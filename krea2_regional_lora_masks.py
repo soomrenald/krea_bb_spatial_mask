@@ -170,9 +170,14 @@ class TokenLayout:
 @dataclass
 class RuntimeSession:
     layout: TokenLayout
+    transformer_options: Dict[str, Any] = field(default_factory=dict)
     mask_cache: Dict[Tuple[int, int, str, str], torch.Tensor] = field(default_factory=dict)
     tensor_cache: Dict[Tuple[int, str, str, str], Tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
     warned: set = field(default_factory=set)
+    wrapper_calls: int = 0
+    hook_calls: int = 0
+    applied_calls: int = 0
+    skipped_no_mask: int = 0
 
 
 class RegionalApplierState:
@@ -208,7 +213,12 @@ class RegionalApplierState:
     def wrapper(self, executor, *args, **kwargs):
         model_obj = getattr(executor, "class_obj", None)
         handles = []
-        self.session = RuntimeSession(layout=self._infer_layout(args, kwargs))
+        transformer_options = _find_transformer_options(args, kwargs)
+        self.session = RuntimeSession(
+            layout=self._infer_layout(args, kwargs),
+            transformer_options=transformer_options,
+            wrapper_calls=1,
+        )
         try:
             if model_obj is None:
                 return executor(*args, **kwargs)
@@ -224,7 +234,17 @@ class RegionalApplierState:
                     len(handles),
                     self.session.layout,
                 )
-            return executor(*args, **kwargs)
+            result = executor(*args, **kwargs)
+            if self.debug:
+                LOGGER.info(
+                    "[Krea2RegionalMultiLoRA] runtime stats: hooks=%d applied=%d skipped_no_mask=%d transformer_img_slice=%s layout=%s",
+                    self.session.hook_calls,
+                    self.session.applied_calls,
+                    self.session.skipped_no_mask,
+                    self.session.transformer_options.get("img_slice"),
+                    self.session.layout,
+                )
+            return result
         finally:
             for h in handles:
                 try:
@@ -291,6 +311,7 @@ class RegionalApplierState:
             session = self.session
             if session is None or not torch.is_tensor(output) or not inputs:
                 return output
+            session.hook_calls += 1
             x = inputs[0]
             if not torch.is_tensor(x) or x.ndim != 3 or output.ndim != 3:
                 return output
@@ -305,6 +326,7 @@ class RegionalApplierState:
                     continue
                 mask = self._mask_for_selection(entry.selection_index, seq_len, x.device, compute_dtype)
                 if mask is None:
+                    session.skipped_no_mask += 1
                     if self.debug and seq_len not in session.warned:
                         session.warned.add(seq_len)
                         LOGGER.warning(
@@ -321,6 +343,7 @@ class RegionalApplierState:
                 if self.outside_strength != 0.0:
                     mask = mask + (1.0 - mask) * self.outside_strength
                 out = out + (delta * mask).to(dtype=out.dtype)
+                session.applied_calls += 1
             return out
 
         return hook
@@ -341,7 +364,21 @@ class RegionalApplierState:
         session = self.session
         assert session is not None
         layout = session.layout
-        imglen = layout.imglen
+        img_slice = session.transformer_options.get("img_slice")
+        if isinstance(img_slice, (list, tuple)) and len(img_slice) >= 2:
+            try:
+                image_start = int(img_slice[0])
+                image_end = int(img_slice[1])
+                imglen = max(0, image_end - image_start)
+                if imglen > 0:
+                    layout.imglen = imglen
+                    layout.txtlen = image_start
+                    if "img_slice" not in layout.source:
+                        layout.source = (layout.source + "+img_slice").strip("+")
+            except Exception:
+                imglen = layout.imglen
+        else:
+            imglen = layout.imglen
         if imglen is None or imglen <= 0:
             return None
         rows, cols = layout.rows, layout.cols
@@ -350,7 +387,9 @@ class RegionalApplierState:
         if not rows or not cols or rows * cols != imglen:
             return None
 
-        if self.token_offset_mode == "manual":
+        if isinstance(img_slice, (list, tuple)) and len(img_slice) >= 2:
+            image_start = int(img_slice[0])
+        elif self.token_offset_mode == "manual":
             image_start = max(0, int(self.manual_image_start))
         elif seq_len == imglen:
             image_start = 0
@@ -542,6 +581,26 @@ def _compute_dtype_for(x: torch.Tensor) -> torch.dtype:
     if torch.cuda.is_available() and x.device.type == "cuda":
         return torch.float16
     return torch.float32
+
+
+def _find_transformer_options(args: Sequence[Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    options = kwargs.get("transformer_options")
+    if isinstance(options, dict):
+        return options
+    for value in reversed(args):
+        if isinstance(value, dict) and (
+            "patches" in value
+            or "wrappers" in value
+            or "callbacks" in value
+            or "transformer_index" in value
+            or "block_index" in value
+            or "img_slice" in value
+        ):
+            return value
+    for value in reversed(args):
+        if isinstance(value, dict):
+            return value
+    return {}
 
 
 def _factor_pairs(n: int) -> Iterable[Tuple[int, int]]:
@@ -901,6 +960,9 @@ def _build_layer_entries(
 ) -> Tuple[Dict[str, List[LayerPatch]], List[str]]:
     all_entries: Dict[str, List[LayerPatch]] = {}
     report: List[str] = []
+    all_linear_modules = list(_iter_named_linears(hook_model_obj, "all_matched_linears"))
+    all_name_to_module = {name: module for name, module in all_linear_modules}
+    all_normalized_name_map = {_normalize_key(name): (name, module) for name, module in all_linear_modules}
     model_modules = list(_iter_named_linears(hook_model_obj, apply_to))
     name_to_module = {name: module for name, module in model_modules}
     normalized_name_map = {_normalize_key(name): (name, module) for name, module in model_modules}
@@ -932,7 +994,9 @@ def _build_layer_entries(
         unsupported_samples: List[str] = []
         shape_samples: List[str] = []
         missing_samples: List[str] = []
+        excluded_samples: List[str] = []
         missing_modules = 0
+        excluded_by_apply_to = 0
 
         for target, patch in loaded.items():
             matrices, reason = _spatial_matrices_from_patch(patch, _target_display(target))
@@ -958,6 +1022,12 @@ def _build_layer_entries(
                 continue
             layer_name = _module_name_from_weight_key(weight_key, name_to_module, normalized_name_map)
             if layer_name is None:
+                excluded_layer_name = _module_name_from_weight_key(weight_key, all_name_to_module, all_normalized_name_map)
+                if excluded_layer_name is not None:
+                    excluded_by_apply_to += 1
+                    if len(excluded_samples) < 6:
+                        excluded_samples.append(weight_key)
+                    continue
                 missing_modules += 1
                 if len(missing_samples) < 6:
                     missing_samples.append(weight_key)
@@ -995,7 +1065,8 @@ def _build_layer_entries(
             f"native_load_error={load_error or '-'} native_patch_sample={_format_sample(loaded.keys(), 5)} "
             f"parsed_pairs={parsed_pairs} matched_layers={matched} "
             f"shape_mismatch={shape_mismatch} unsupported_targets={unsupported_targets} unsupported_reasons={unsupported_summary} "
-            f"missing_modules={missing_modules} unsupported_samples={_format_sample(unsupported_samples, 6)} "
+            f"excluded_by_apply_to={excluded_by_apply_to} missing_modules={missing_modules} "
+            f"unsupported_samples={_format_sample(unsupported_samples, 6)} excluded_samples={_format_sample(excluded_samples, 6)} "
             f"shape_samples={_format_sample(shape_samples, 6)} missing_samples={_format_sample(missing_samples, 6)}"
         )
         if len(loaded) > 0 and matched == 0:
