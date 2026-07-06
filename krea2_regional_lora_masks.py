@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import re
+import types
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -64,8 +65,9 @@ WEB_DIRECTORY = "./web"
 WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
-NODE_VERSION = "2026-07-06.9-global-textfusion-regional-image"
+NODE_VERSION = "2026-07-06.10-krea-position-id-mask"
 TEXT_TOKEN_STRENGTH = 0.0
+KREA_OUTPUT_IMAGE_INDICATOR = 2
 
 DEFAULT_LORAS_JSON = json.dumps(
     [
@@ -184,6 +186,14 @@ class RuntimeSession:
     hook_calls: int = 0
     applied_calls: int = 0
     skipped_no_mask: int = 0
+    geometry_updates: int = 0
+    geometry_source: str = "none"
+    geometry_seq_len: Optional[int] = None
+    geometry_image_mask: Optional[torch.Tensor] = None
+    geometry_x_norm: Optional[torch.Tensor] = None
+    geometry_y_norm: Optional[torch.Tensor] = None
+    geometry_rows: Optional[int] = None
+    geometry_cols: Optional[int] = None
 
 
 class RegionalApplierState:
@@ -227,9 +237,11 @@ class RegionalApplierState:
             transformer_options=transformer_options,
             wrapper_calls=1,
         )
+        original_backbone = None
         try:
             if model_obj is None:
                 return executor(*args, **kwargs)
+            original_backbone = self._install_krea_backbone_capture(model_obj)
             name_to_module = dict(model_obj.named_modules())
             for layer_name, entries in self.layer_entries.items():
                 module = name_to_module.get(layer_name)
@@ -245,21 +257,119 @@ class RegionalApplierState:
             result = executor(*args, **kwargs)
             if self.debug:
                 LOGGER.info(
-                    "[Krea2RegionalMultiLoRA] runtime stats: hooks=%d applied=%d skipped_no_mask=%d transformer_img_slice=%s layout=%s",
+                    "[Krea2RegionalMultiLoRA] runtime stats: hooks=%d applied=%d skipped_no_mask=%d geometry_updates=%d geometry=%s seq=%s grid=%sx%s transformer_img_slice=%s layout=%s",
                     self.session.hook_calls,
                     self.session.applied_calls,
                     self.session.skipped_no_mask,
+                    self.session.geometry_updates,
+                    self.session.geometry_source,
+                    self.session.geometry_seq_len,
+                    self.session.geometry_rows,
+                    self.session.geometry_cols,
                     self.session.transformer_options.get("img_slice"),
                     self.session.layout,
                 )
             return result
         finally:
+            if original_backbone is not None:
+                try:
+                    setattr(model_obj, "_backbone", original_backbone)
+                except Exception:
+                    pass
             for h in handles:
                 try:
                     h.remove()
                 except Exception:
                     pass
             self.session = None
+
+    def _install_krea_backbone_capture(self, model_obj: Any) -> Optional[Any]:
+        original_backbone = getattr(model_obj, "_backbone", None)
+        if original_backbone is None or not callable(original_backbone):
+            return None
+
+        def patched_backbone(this_model, llm_features, x, t, position_ids, attn_mask, indicator, transformer_options={}):
+            session = self.session
+            if session is not None:
+                if isinstance(transformer_options, dict):
+                    session.transformer_options = transformer_options
+                self._update_krea_geometry(position_ids, indicator)
+            return original_backbone(llm_features, x, t, position_ids, attn_mask, indicator, transformer_options=transformer_options)
+
+        setattr(model_obj, "_backbone", types.MethodType(patched_backbone, model_obj))
+        return original_backbone
+
+    def _update_krea_geometry(self, position_ids: Any, indicator: Any) -> None:
+        session = self.session
+        if session is None or not torch.is_tensor(position_ids) or not torch.is_tensor(indicator):
+            return
+        if position_ids.ndim != 3 or position_ids.shape[-1] < 3 or indicator.ndim != 2:
+            return
+        if int(position_ids.shape[1]) != int(indicator.shape[1]):
+            return
+
+        seq_len = int(indicator.shape[1])
+        image_mask_2d = indicator == KREA_OUTPUT_IMAGE_INDICATOR
+        if not bool(image_mask_2d.any().detach().cpu()):
+            return
+        image_mask = image_mask_2d.any(dim=0)
+        if not bool(image_mask.any().detach().cpu()):
+            return
+
+        pos = position_ids[0]
+        rows_raw = pos[:, 1].to(dtype=torch.float32)
+        cols_raw = pos[:, 2].to(dtype=torch.float32)
+        img_rows = rows_raw[image_mask]
+        img_cols = cols_raw[image_mask]
+        row_min = img_rows.min()
+        col_min = img_cols.min()
+        row_max = img_rows.max()
+        col_max = img_cols.max()
+        rows = max(1, int((row_max - row_min + 1).detach().cpu().item()))
+        cols = max(1, int((col_max - col_min + 1).detach().cpu().item()))
+
+        y_norm = torch.zeros((seq_len,), device=position_ids.device, dtype=torch.float32)
+        x_norm = torch.zeros((seq_len,), device=position_ids.device, dtype=torch.float32)
+        y_norm[image_mask] = (rows_raw[image_mask] - row_min + 0.5) / float(rows)
+        x_norm[image_mask] = (cols_raw[image_mask] - col_min + 0.5) / float(cols)
+
+        session.geometry_updates += 1
+        session.geometry_source = "krea_backbone_position_ids_indicator"
+        session.geometry_seq_len = seq_len
+        session.geometry_image_mask = image_mask.detach()
+        session.geometry_x_norm = x_norm.detach()
+        session.geometry_y_norm = y_norm.detach()
+        session.geometry_rows = rows
+        session.geometry_cols = cols
+        session.layout.imglen = int(image_mask.sum().detach().cpu().item())
+        session.layout.txtlen = int(image_mask.to(torch.long).argmax().detach().cpu().item()) if bool(image_mask[0].logical_not().detach().cpu()) else 0
+        session.layout.rows = rows
+        session.layout.cols = cols
+        if "krea_position_ids" not in session.layout.source:
+            session.layout.source = (session.layout.source + "+krea_position_ids").strip("+")
+        session.mask_cache.clear()
+
+        if self.debug:
+            coverage = []
+            for idx, selection in enumerate(self.stack.selections):
+                if not selection.enabled:
+                    continue
+                mask = self._mask_for_selection(idx, seq_len, position_ids.device, torch.float32)
+                if mask is None:
+                    coverage.append(f"{selection.alias}=none")
+                else:
+                    image_values = mask.view(seq_len)[image_mask]
+                    coverage.append(
+                        f"{selection.alias}=sum{float(image_values.sum().detach().cpu()):.1f}/max{float(image_values.max().detach().cpu()):.3f}"
+                    )
+            LOGGER.info(
+                "[Krea2RegionalMultiLoRA] captured Krea geometry seq=%d image_tokens=%d grid=%dx%d coverage=%s",
+                seq_len,
+                int(image_mask.sum().detach().cpu().item()),
+                rows,
+                cols,
+                ", ".join(coverage) if coverage else "-",
+            )
 
     def _infer_layout(self, args: Sequence[Any], kwargs: Dict[str, Any]) -> TokenLayout:
         imglen = None
@@ -338,11 +448,11 @@ class RegionalApplierState:
                 return output
             session.hook_calls += 1
             x = inputs[0]
-            if not torch.is_tensor(x) or x.ndim != 3 or output.ndim != 3:
+            if not torch.is_tensor(x) or x.ndim < 2 or output.ndim < 2:
                 return output
-            if x.shape[0] != output.shape[0] or x.shape[1] != output.shape[1]:
+            if x.shape[:-1] != output.shape[:-1]:
                 return output
-            seq_len = int(x.shape[1])
+            seq_len = int(x.shape[-2])
             out = output
             compute_dtype = _compute_dtype_for(x)
             for entry in entries:
@@ -365,10 +475,11 @@ class RegionalApplierState:
                                 seq_len,
                                 session.layout,
                                 entry.layer_name,
-                            )
+                        )
                         continue
                 elif self.outside_strength != 0.0:
                     mask = mask + (1.0 - mask) * self.outside_strength
+                mask = _reshape_token_mask(mask, x.ndim)
                 if self.debug and seq_len not in session.warned:
                     if self.outside_strength != 0.0 and mask is not None:
                         session.warned.add(seq_len)
@@ -406,6 +517,10 @@ class RegionalApplierState:
         session = self.session
         assert session is not None
         layout = session.layout
+        geometry_mask = self._mask_from_krea_geometry(selection_index, seq_len, device, dtype)
+        if geometry_mask is not None:
+            return geometry_mask
+
         img_slice = session.transformer_options.get("img_slice")
         if isinstance(img_slice, (list, tuple)) and len(img_slice) >= 2:
             try:
@@ -475,6 +590,43 @@ class RegionalApplierState:
         if image_start > 0 and TEXT_TOKEN_STRENGTH != 0.0:
             full[:image_start] = float(TEXT_TOKEN_STRENGTH)
         full[image_start:image_start + imglen] = token_mask
+        full = full.view(1, seq_len, 1)
+        session.mask_cache[key] = full
+        return full
+
+    def _mask_from_krea_geometry(self, selection_index: int, seq_len: int, device: torch.device, dtype: torch.dtype) -> Optional[torch.Tensor]:
+        session = self.session
+        assert session is not None
+        if (
+            session.geometry_seq_len != seq_len
+            or session.geometry_image_mask is None
+            or session.geometry_x_norm is None
+            or session.geometry_y_norm is None
+        ):
+            return None
+
+        key = (selection_index, seq_len, str(device), str(dtype))
+        cached = session.mask_cache.get(key)
+        if cached is not None:
+            return cached
+
+        selection = self.stack.selections[selection_index]
+        box_indices = [i for i in selection.boxes if 0 <= i < len(self.boxes)]
+        if not box_indices:
+            return None
+
+        image_mask = session.geometry_image_mask.to(device=device)
+        x_norm = session.geometry_x_norm.to(device=device, dtype=torch.float32)
+        y_norm = session.geometry_y_norm.to(device=device, dtype=torch.float32)
+        token_mask = torch.zeros((seq_len,), device=device, dtype=torch.float32)
+        for box_index in box_indices:
+            box_mask = _rect_position_mask(x_norm, y_norm, image_mask, self.boxes[box_index], self.seam_feather)
+            token_mask = torch.maximum(token_mask, box_mask)
+
+        full = torch.zeros((seq_len,), device=device, dtype=dtype)
+        if TEXT_TOKEN_STRENGTH != 0.0:
+            full[~image_mask] = float(TEXT_TOKEN_STRENGTH)
+        full[image_mask] = token_mask[image_mask].to(dtype=dtype)
         full = full.view(1, seq_len, 1)
         session.mask_cache[key] = full
         return full
@@ -695,6 +847,29 @@ def _rect_token_mask(rows: int, cols: int, bbox: Tuple[float, float, float, floa
     top = torch.sigmoid((rr - y0 * rows) / fy)
     bottom = torch.sigmoid((y1 * rows - rr) / fy)
     return (left * right * top * bottom).reshape(-1).clamp(0.0, 1.0)
+
+
+def _rect_position_mask(
+    x_norm: torch.Tensor,
+    y_norm: torch.Tensor,
+    image_mask: torch.Tensor,
+    bbox: Tuple[float, float, float, float],
+    feather: float,
+) -> torch.Tensor:
+    x0, y0, x1, y1 = bbox
+    f = max(1e-4, float(feather))
+    left = torch.sigmoid((x_norm - float(x0)) / f)
+    right = torch.sigmoid((float(x1) - x_norm) / f)
+    top = torch.sigmoid((y_norm - float(y0)) / f)
+    bottom = torch.sigmoid((float(y1) - y_norm) / f)
+    out = (left * right * top * bottom).clamp(0.0, 1.0)
+    return out * image_mask.to(dtype=out.dtype)
+
+
+def _reshape_token_mask(mask: torch.Tensor, target_ndim: int) -> torch.Tensor:
+    if target_ndim <= 2:
+        return mask.view(mask.shape[-2], 1)
+    return mask.view(*([1] * (target_ndim - 2)), mask.shape[-2], 1)
 
 
 # -------------------- bbox parsing --------------------
@@ -1150,7 +1325,7 @@ def _format_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, 
         f"Krea2 Regional LoRA node version: {NODE_VERSION}",
         f"Mask semantics: text_token_strength={TEXT_TOKEN_STRENGTH:.3f}, image_tokens=bbox_mask, padding_tokens=outside_strength",
         "Mask scope: txtfusion/textfusion LoRA layers apply globally as conditioning; image/block layers apply regionally",
-        "Mask layout: runtime latent grid using model.patch_size, then transformer_options.img_slice/text-length for sequence placement",
+        "Mask layout: Krea _backbone position_ids/indicator first; runtime latent grid only as fallback",
         f"LoRA count: {len(stack.selections)}",
         f"BBox count: {len(boxes)}",
         "Assignments:",

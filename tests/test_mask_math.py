@@ -24,3 +24,14 @@ def test_rect_mask_shape():
     assert tuple(mask.shape) == (64,)
     assert float(mask.max()) <= 1.0
     assert float(mask.min()) >= 0.0
+
+
+def test_rect_position_mask_uses_normalized_token_coords():
+    x = mod.torch.tensor([0.125, 0.875, 0.125, 0.875])
+    y = mod.torch.tensor([0.125, 0.125, 0.875, 0.875])
+    image = mod.torch.tensor([True, True, True, True])
+    mask = mod._rect_position_mask(x, y, image, (0.0, 0.0, 0.5, 0.5), 0.01)
+    assert int(mask.argmax()) == 0
+    assert float(mask[0]) > 0.99
+    assert float(mask[1]) < 0.01
+    assert float(mask[2]) < 0.01
