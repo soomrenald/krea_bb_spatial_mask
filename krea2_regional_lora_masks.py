@@ -64,8 +64,8 @@ WEB_DIRECTORY = "./web"
 WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
-NODE_VERSION = "2026-07-06.6-text-unmasked-image-bbox"
-TEXT_TOKEN_STRENGTH = 1.0
+NODE_VERSION = "2026-07-06.8-runtime-latent-grid"
+TEXT_TOKEN_STRENGTH = 0.0
 
 DEFAULT_LORAS_JSON = json.dumps(
     [
@@ -216,8 +216,10 @@ class RegionalApplierState:
         model_obj = getattr(executor, "class_obj", None)
         handles = []
         transformer_options = _find_transformer_options(args, kwargs)
+        layout = self._infer_layout(args, kwargs)
+        self._apply_runtime_latent_grid(layout, args, model_obj)
         self.session = RuntimeSession(
-            layout=self._infer_layout(args, kwargs),
+            layout=layout,
             transformer_options=transformer_options,
             wrapper_calls=1,
         )
@@ -286,8 +288,11 @@ class RegionalApplierState:
 
         if txtlen is None:
             context = kwargs.get("context", None)
-            if context is None and len(args) > 1 and torch.is_tensor(args[1]):
-                context = args[1]
+            if context is None:
+                for a in args[1:]:
+                    if torch.is_tensor(a) and a.ndim == 3:
+                        context = a
+                        break
             if torch.is_tensor(context):
                 if context.ndim == 3:
                     txtlen = int(context.shape[1])
@@ -307,6 +312,20 @@ class RegionalApplierState:
                 source.append("factor_grid")
 
         return TokenLayout(imglen=imglen, txtlen=txtlen, rows=rows, cols=cols, source="+".join(source) or "unknown")
+
+    def _apply_runtime_latent_grid(self, layout: TokenLayout, args: Sequence[Any], model_obj: Any) -> None:
+        if not args or not torch.is_tensor(args[0]) or args[0].ndim < 4:
+            return
+        latent = args[0]
+        h = int(latent.shape[-2])
+        w = int(latent.shape[-1])
+        patch_size = int(getattr(model_obj, "patch_size", 2) or 2)
+        rows = max(1, (h + (patch_size // 2)) // patch_size)
+        cols = max(1, (w + (patch_size // 2)) // patch_size)
+        layout.rows = rows
+        layout.cols = cols
+        layout.imglen = rows * cols
+        layout.source = (layout.source + f"+latent_grid_{h}x{w}_p{patch_size}").strip("+")
 
     def _make_forward_hook(self, entries: List[LayerPatch]):
         def hook(module, inputs, output):
@@ -385,7 +404,9 @@ class RegionalApplierState:
             try:
                 image_start = int(img_slice[0])
                 image_end = int(img_slice[1])
-                imglen = max(0, image_end - image_start)
+                slice_imglen = max(0, image_end - image_start)
+                grid_imglen = (layout.rows or 0) * (layout.cols or 0)
+                imglen = grid_imglen if grid_imglen > 0 and grid_imglen <= slice_imglen else slice_imglen
                 if imglen > 0:
                     layout.imglen = imglen
                     layout.txtlen = image_start
@@ -395,6 +416,11 @@ class RegionalApplierState:
                 imglen = layout.imglen
         else:
             imglen = layout.imglen
+            if (imglen is None or imglen <= 0) and layout.txtlen is not None and seq_len > layout.txtlen:
+                imglen = seq_len - int(layout.txtlen)
+                layout.imglen = imglen
+                if "seq_minus_txt" not in layout.source:
+                    layout.source = (layout.source + "+seq_minus_txt").strip("+")
         if imglen is None or imglen <= 0:
             return None
         rows, cols = layout.rows, layout.cols
@@ -1104,6 +1130,7 @@ def _format_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, 
     lines = [
         f"Krea2 Regional LoRA node version: {NODE_VERSION}",
         f"Mask semantics: text_token_strength={TEXT_TOKEN_STRENGTH:.3f}, image_tokens=bbox_mask, padding_tokens=outside_strength",
+        "Mask layout: runtime latent grid using model.patch_size, then transformer_options.img_slice/text-length for sequence placement",
         f"LoRA count: {len(stack.selections)}",
         f"BBox count: {len(boxes)}",
         "Assignments:",
