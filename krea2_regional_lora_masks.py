@@ -518,7 +518,7 @@ def _parse_regions(regions_json: str) -> List[RegionSpec]:
             strength = 1.0
         enabled = _as_bool(item.get("enabled", item.get("enable", True)), True)
         name = str(item.get("name", f"region_{i+1}") or f"region_{i+1}")
-        bbox = _bbox_from_any(item.get("bbox", item), canvas_w=1, canvas_h=1, list_format="xyxy")
+        bbox = _bbox_from_any(item.get("bbox", item), canvas_w=1, canvas_h=1)
         regions.append(RegionSpec(name=name, lora=lora, strength=strength, enabled=enabled, bbox=bbox))
     return regions
 
@@ -544,7 +544,7 @@ def _normalize_bboxes_input(bboxes: Any) -> List[Any]:
     return []
 
 
-def _bbox_from_any(box: Any, canvas_w: int, canvas_h: int, list_format: str = "xywh") -> Optional[Tuple[float, float, float, float]]:
+def _bbox_from_any(box: Any, canvas_w: int, canvas_h: int) -> Optional[Tuple[float, float, float, float]]:
     if box is None:
         return None
     try:
@@ -552,7 +552,7 @@ def _bbox_from_any(box: Any, canvas_w: int, canvas_h: int, list_format: str = "x
             box = _json_loads_maybe(box, None)
         if isinstance(box, dict):
             if "bbox" in box and box["bbox"] is not box:
-                return _bbox_from_any(box["bbox"], canvas_w, canvas_h, list_format)
+                return _bbox_from_any(box["bbox"], canvas_w, canvas_h)
             if "x1" in box and "y1" in box:
                 x0 = float(box.get("x0", box.get("x", 0.0)))
                 y0 = float(box.get("y0", box.get("y", 0.0)))
@@ -569,24 +569,11 @@ def _bbox_from_any(box: Any, canvas_w: int, canvas_h: int, list_format: str = "x
             vals = list(box)[:4]
             if len(vals) < 4:
                 return None
-            a, b, c, d = [float(v) for v in vals]
-            # KJNodes legacy BBOX is (x, y, width, height). Most Comfy
-            # BoundingBox dicts use {x,y,width,height}. For raw 4-value lists,
-            # default to xywh so KJNodes BatchCrop/SplitBboxes/BboxToInt outputs
-            # are interpreted correctly. Use list_format="xyxy" if manually
-            # feeding x0,y0,x1,y1 lists.
-            if list_format == "xyxy":
-                x0, y0, x1, y1 = a, b, c, d
-            elif list_format == "auto":
-                # Conservative heuristic: if c/d are greater than a/b, xyxy is
-                # plausible, but KJNodes xywh can also satisfy that. Prefer xywh
-                # unless the pair already looks normalized as x1/y1 within [0,1].
-                if max(abs(a), abs(b), abs(c), abs(d)) <= 1.0 and c > a and d > b:
-                    x0, y0, x1, y1 = a, b, c, d
-                else:
-                    x0, y0, x1, y1 = a, b, a + max(0.0, c), b + max(0.0, d)
-            else:
-                x0, y0, x1, y1 = a, b, a + max(0.0, c), b + max(0.0, d)
+            x0, y0, x1, y1 = [float(v) for v in vals]
+            # For list values, assume x0,y0,x1,y1 unless x1/y1 look like width/height.
+            if x1 <= x0 or y1 <= y0:
+                x1 = x0 + max(0.0, x1)
+                y1 = y0 + max(0.0, y1)
 
         max_abs = max(abs(x0), abs(y0), abs(x1), abs(y1))
         if max_abs > 1.0:
@@ -622,58 +609,10 @@ def _auto_split_boxes(n: int, mode: str) -> List[Tuple[float, float, float, floa
     return out
 
 
-def _boxes_from_ideogram_prompt(prompt_json: Any) -> List[Tuple[float, float, float, float]]:
-    """Parse KJNodes Ideogram4PromptBuilderKJ prompt JSON fallback.
-
-    The prompt builder's default JSON bbox format is Ideogram's 0-1000 grid:
-    [ymin, xmin, ymax, xmax]. This parser intentionally treats only that
-    canonical output as a fallback; its direct BoundingBox socket is preferred.
-    """
-    data = _json_loads_maybe(prompt_json, None)
-    if not isinstance(data, dict):
-        return []
-    cd = data.get("compositional_deconstruction") or {}
-    elements = cd.get("elements") or []
-    out = []
-    for el in elements:
-        if not isinstance(el, dict):
-            continue
-        bb = el.get("bbox")
-        if not isinstance(bb, (list, tuple)) or len(bb) != 4:
-            continue
-        try:
-            ymin, xmin, ymax, xmax = [float(v) for v in bb]
-        except Exception:
-            continue
-        if ymin > ymax:
-            ymin, ymax = ymax, ymin
-        if xmin > xmax:
-            xmin, xmax = xmax, xmin
-        out.append((xmin / 1000.0, ymin / 1000.0, xmax / 1000.0, ymax / 1000.0))
-    return out
-
-
-def _collect_boxes(
-    regions: List[RegionSpec],
-    bboxes: Any,
-    split_mode: str,
-    canvas_w: int,
-    canvas_h: int,
-    kj_bboxes: Any = None,
-    ideogram_prompt_json: Any = None,
-    bbox_list_format: str = "xywh",
-) -> List[Optional[Tuple[float, float, float, float]]]:
+def _collect_boxes(regions: List[RegionSpec], bboxes: Any, split_mode: str, canvas_w: int, canvas_h: int) -> List[Optional[Tuple[float, float, float, float]]]:
     boxes: List[Optional[Tuple[float, float, float, float]]] = []
-
-    # Priority: direct BoundingBox socket, legacy KJNodes BBOX socket, then
-    # Ideogram prompt JSON fallback, then per-region JSON, then auto split.
-    external_raw = _normalize_bboxes_input(bboxes)
-    if not external_raw:
-        external_raw = _normalize_bboxes_input(kj_bboxes)
-    external = [_bbox_from_any(b, canvas_w, canvas_h, list_format=bbox_list_format) for b in external_raw]
+    external = [_bbox_from_any(b, canvas_w, canvas_h) for b in _normalize_bboxes_input(bboxes)]
     external = [b for b in external if b is not None]
-    if not external and ideogram_prompt_json:
-        external = _boxes_from_ideogram_prompt(ideogram_prompt_json)
 
     for i, r in enumerate(regions):
         if i < len(external):
@@ -826,7 +765,6 @@ class Krea2RegionalLoRAMasks:
                 "canvas_width": ("INT", {"default": 1024, "min": 1, "max": 16384}),
                 "canvas_height": ("INT", {"default": 1024, "min": 1, "max": 16384}),
                 "split_mode": (["bbox_or_json", "auto_vertical", "auto_horizontal"], {"default": "bbox_or_json"}),
-                "bbox_list_format": (["xywh", "xyxy", "auto"], {"default": "xywh"}),
                 "seam_feather": ("FLOAT", {"default": 0.06, "min": 0.0, "max": 0.5, "step": 0.005}),
                 "outside_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "base_strength": ("FLOAT", {"default": 1.0, "min": -5.0, "max": 5.0, "step": 0.05}),
@@ -839,8 +777,6 @@ class Krea2RegionalLoRAMasks:
             },
             "optional": {
                 "bboxes": ("BOUNDING_BOX",),
-                "kj_bboxes": ("BBOX",),
-                "ideogram_prompt_json": ("STRING", {"forceInput": True}),
             },
         }
 
@@ -851,7 +787,6 @@ class Krea2RegionalLoRAMasks:
         canvas_width: int,
         canvas_height: int,
         split_mode: str,
-        bbox_list_format: str,
         seam_feather: float,
         outside_strength: float,
         base_strength: float,
@@ -862,8 +797,6 @@ class Krea2RegionalLoRAMasks:
         apply_to: str,
         debug_logging: str,
         bboxes=None,
-        kj_bboxes=None,
-        ideogram_prompt_json="",
     ):
         if patcher_extension is None:
             raise RuntimeError("This node requires recent ComfyUI with comfy.patcher_extension.")
@@ -876,12 +809,7 @@ class Krea2RegionalLoRAMasks:
         if not regions:
             return (model, "No valid regions_json entries; model unchanged.")
 
-        boxes = _collect_boxes(
-            regions, bboxes, split_mode, canvas_width, canvas_height,
-            kj_bboxes=kj_bboxes,
-            ideogram_prompt_json=ideogram_prompt_json,
-            bbox_list_format=bbox_list_format,
-        )
+        boxes = _collect_boxes(regions, bboxes, split_mode, canvas_width, canvas_height)
         valid_regions = []
         valid_boxes = []
         for r, b in zip(regions, boxes):
@@ -962,18 +890,15 @@ class Krea2RegionMaskPreview:
                 "preview_height": ("INT", {"default": 64, "min": 8, "max": 2048}),
                 "preview_width": ("INT", {"default": 64, "min": 8, "max": 2048}),
                 "seam_feather": ("FLOAT", {"default": 0.06, "min": 0.0, "max": 0.5, "step": 0.005}),
-                "bbox_list_format": (["xywh", "xyxy", "auto"], {"default": "xywh"}),
             },
             "optional": {
                 "bboxes": ("BOUNDING_BOX",),
-                "kj_bboxes": ("BBOX",),
-                "ideogram_prompt_json": ("STRING", {"forceInput": True}),
             },
         }
 
-    def preview(self, regions_json, canvas_width, canvas_height, preview_height, preview_width, seam_feather, bbox_list_format="xywh", bboxes=None, kj_bboxes=None, ideogram_prompt_json=""):
+    def preview(self, regions_json, canvas_width, canvas_height, preview_height, preview_width, seam_feather, bboxes=None):
         regions = _parse_regions(regions_json)
-        boxes = _collect_boxes(regions, bboxes, "bbox_or_json", canvas_width, canvas_height, kj_bboxes=kj_bboxes, ideogram_prompt_json=ideogram_prompt_json, bbox_list_format=bbox_list_format)
+        boxes = _collect_boxes(regions, bboxes, "bbox_or_json", canvas_width, canvas_height)
         masks = []
         for b in boxes:
             if b is None:

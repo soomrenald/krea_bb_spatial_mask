@@ -21,10 +21,7 @@ Inputs:
 - `model`: Krea2 MODEL from `UNETLoader`
 - `regions_json`: list of LoRA regions
 - `canvas_width`, `canvas_height`: coordinate reference for pixel-space boxes
-- `bboxes`: optional modern `BOUNDING_BOX` input from a box builder node, including KJNodes Ideogram 4 Prompt Builder KJ
-- `kj_bboxes`: optional legacy KJNodes `BBOX` input from nodes such as Batch Crop From Mask, Split Bboxes, or similar
-- `ideogram_prompt_json`: optional fallback STRING input from Ideogram 4 Prompt Builder KJ's prompt output; parses default `[ymin,xmin,ymax,xmax]` 0-1000 bboxes
-- `bbox_list_format`: how raw 4-number list/tuple boxes are interpreted. Use `xywh` for KJNodes legacy `BBOX`; use `xyxy` for x0,y0,x1,y1 lists.
+- `bboxes`: optional `BOUNDING_BOX` input from a box builder node
 - `split_mode`: fallback region splitting if no bbox is supplied
 - `seam_feather`: soft edge width as a fraction of the token grid
 - `outside_strength`: deliberate outside-region leak; keep at `0.0` for identity separation
@@ -70,17 +67,7 @@ Builds the same rectangular masks at preview resolution so you can check region 
 
 Coordinates may be normalized `0..1` or pixels relative to `canvas_width` / `canvas_height`.
 
-If a `BOUNDING_BOX` or `BBOX` input is connected, external boxes override JSON boxes by row order.
-
-### KJNodes / Kijai bbox compatibility
-
-The node accepts both KJNodes bbox styles:
-
-- **Ideogram 4 Prompt Builder KJ**: connect its `bboxes` output directly to this node's `bboxes` input. KJNodes emits the canonical Comfy `BoundingBox` shape as per-frame nested pixel-space dicts: `[[{"x":..., "y":..., "width":..., "height":...}]]`.
-- **Legacy KJNodes crop/bbox nodes**: connect their `BBOX` output to this node's `kj_bboxes` input. These boxes are interpreted as `(x_min, y_min, width, height)`, so keep `bbox_list_format=xywh`.
-- **Fallback**: connect Ideogram 4 Prompt Builder KJ's `prompt` string to `ideogram_prompt_json`. This parses the default Ideogram bbox order `[ymin, xmin, ymax, xmax]` on the 0-1000 grid. Prefer the direct `bboxes` socket when available.
-
-External bbox mapping is by row order: bbox 1 -> region 1 / LoRA 1, bbox 2 -> region 2 / LoRA 2.
+If a `BOUNDING_BOX` input is connected, external boxes override JSON boxes by row order.
 
 ## Recommended workflow
 
