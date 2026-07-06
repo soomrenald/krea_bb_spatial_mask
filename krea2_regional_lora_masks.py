@@ -64,7 +64,7 @@ WEB_DIRECTORY = "./web"
 WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
-NODE_VERSION = "2026-07-06.8-runtime-latent-grid"
+NODE_VERSION = "2026-07-06.9-global-textfusion-regional-image"
 TEXT_TOKEN_STRENGTH = 0.0
 
 DEFAULT_LORAS_JSON = json.dumps(
@@ -106,10 +106,6 @@ COMMON_PREFIXES = (
 )
 
 DEFAULT_EXCLUDED_NAME_FRAGMENTS = (
-    "txtfusion",
-    "txt_fusion",
-    "textfusion",
-    "text_fusion",
     "txtmlp",
     "txt_mlp",
     "textmlp",
@@ -125,6 +121,13 @@ DEFAULT_EXCLUDED_NAME_FRAGMENTS = (
     ".last",
     "pos_embed",
     "posemb",
+)
+
+GLOBAL_CONDITIONING_NAME_FRAGMENTS = (
+    "txtfusion",
+    "txt_fusion",
+    "textfusion",
+    "text_fusion",
 )
 
 
@@ -158,6 +161,7 @@ class LayerPatch:
     lora_key: str
     strength: float
     matrices: LoraMatrices
+    mask_scope: str = "regional"
 
 
 @dataclass
@@ -345,7 +349,10 @@ class RegionalApplierState:
                 selection = self.stack.selections[entry.selection_index]
                 if not selection.enabled:
                     continue
-                mask = self._mask_for_selection(entry.selection_index, seq_len, x.device, compute_dtype)
+                if entry.mask_scope == "global_conditioning":
+                    mask = torch.ones((1, seq_len, 1), device=x.device, dtype=compute_dtype)
+                else:
+                    mask = self._mask_for_selection(entry.selection_index, seq_len, x.device, compute_dtype)
                 if mask is None:
                     if self.outside_strength != 0.0:
                         mask = torch.full((1, seq_len, 1), float(self.outside_strength), device=x.device, dtype=compute_dtype)
@@ -991,11 +998,19 @@ def _iter_named_linears(model_obj, apply_to: str) -> Iterable[Tuple[str, Any]]:
             continue
         lname = name.lower()
         if apply_to == "krea_blocks_only":
-            if any(fragment in lname for fragment in DEFAULT_EXCLUDED_NAME_FRAGMENTS):
+            is_global_conditioning = any(fragment in lname for fragment in GLOBAL_CONDITIONING_NAME_FRAGMENTS)
+            if not is_global_conditioning and any(fragment in lname for fragment in DEFAULT_EXCLUDED_NAME_FRAGMENTS):
                 continue
-            if not any(token in lname for token in ("double_blocks", "single_blocks", "blocks.", "joint_blocks", "img_mlp", "img_attn", "attn", "mlp")):
+            if not is_global_conditioning and not any(token in lname for token in ("double_blocks", "single_blocks", "blocks.", "joint_blocks", "img_mlp", "img_attn", "attn", "mlp")):
                 continue
         yield name, module
+
+
+def _mask_scope_for_layer(layer_name: str) -> str:
+    lname = layer_name.lower()
+    if any(fragment in lname for fragment in GLOBAL_CONDITIONING_NAME_FRAGMENTS):
+        return "global_conditioning"
+    return "regional"
 
 
 def _build_layer_entries(
@@ -1043,6 +1058,7 @@ def _build_layer_entries(
         excluded_samples: List[str] = []
         missing_modules = 0
         excluded_by_apply_to = 0
+        global_conditioning_layers = 0
 
         for target, patch in loaded.items():
             matrices, reason = _spatial_matrices_from_patch(patch, _target_display(target))
@@ -1099,8 +1115,11 @@ def _build_layer_entries(
                     lora_key=weight_key,
                     strength=selection.strength,
                     matrices=matrices,
+                    mask_scope=_mask_scope_for_layer(layer_name),
                 )
             )
+            if _mask_scope_for_layer(layer_name) == "global_conditioning":
+                global_conditioning_layers += 1
             matched += 1
 
         unsupported_summary = ", ".join(f"{k}:{v}" for k, v in sorted(unsupported_reasons.items())) or "-"
@@ -1111,7 +1130,7 @@ def _build_layer_entries(
             f"native_load_error={load_error or '-'} native_patch_sample={_format_sample(loaded.keys(), 5)} "
             f"parsed_pairs={parsed_pairs} matched_layers={matched} "
             f"shape_mismatch={shape_mismatch} unsupported_targets={unsupported_targets} unsupported_reasons={unsupported_summary} "
-            f"excluded_by_apply_to={excluded_by_apply_to} missing_modules={missing_modules} "
+            f"global_conditioning_layers={global_conditioning_layers} excluded_by_apply_to={excluded_by_apply_to} missing_modules={missing_modules} "
             f"unsupported_samples={_format_sample(unsupported_samples, 6)} excluded_samples={_format_sample(excluded_samples, 6)} "
             f"shape_samples={_format_sample(shape_samples, 6)} missing_samples={_format_sample(missing_samples, 6)}"
         )
@@ -1130,6 +1149,7 @@ def _format_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, 
     lines = [
         f"Krea2 Regional LoRA node version: {NODE_VERSION}",
         f"Mask semantics: text_token_strength={TEXT_TOKEN_STRENGTH:.3f}, image_tokens=bbox_mask, padding_tokens=outside_strength",
+        "Mask scope: txtfusion/textfusion LoRA layers apply globally as conditioning; image/block layers apply regionally",
         "Mask layout: runtime latent grid using model.patch_size, then transformer_options.img_slice/text-length for sequence placement",
         f"LoRA count: {len(stack.selections)}",
         f"BBox count: {len(boxes)}",
