@@ -1,0 +1,12 @@
+[project]
+name = "comfyui-krea2-regional-lora-masks"
+version = "0.1.0"
+description = "Patched Krea2 regional multi-character LoRA masking nodes for ComfyUI"
+requires-python = ">=3.10"
+dependencies = ["torch", "safetensors"]
+license = {text = "MIT"}
+
+[tool.comfy]
+PublisherId = "local"
+DisplayName = "Krea2 Regional LoRA Masks"
+Icon = ""
