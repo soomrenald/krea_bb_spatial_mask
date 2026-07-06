@@ -44,9 +44,11 @@ except Exception:  # pragma: no cover
 try:
     import comfy.lora as comfy_lora
     import comfy.lora_convert as comfy_lora_convert
+    import comfy.utils as comfy_utils
 except Exception:  # pragma: no cover
     comfy_lora = None
     comfy_lora_convert = None
+    comfy_utils = None
 
 try:
     from PIL import Image, ImageDraw
@@ -739,54 +741,33 @@ def _collect_boxes(
 # -------------------- lora loading and patch graph --------------------
 
 
-def _load_lora_state_dict(path: str) -> Dict[str, torch.Tensor]:
-    if _SAFETENSORS_IMPORT_ERROR is not None:
-        raise RuntimeError(f"safetensors import failed: {_SAFETENSORS_IMPORT_ERROR}")
-    sd = safetensors.torch.load_file(path, device="cpu")
+def _sample_list(values: Iterable[Any], limit: int = 6) -> List[str]:
+    out = []
+    for value in values:
+        out.append(str(value))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _format_sample(values: Iterable[Any], limit: int = 6) -> str:
+    sample = _sample_list(values, limit)
+    return "[" + "; ".join(sample) + "]" if sample else "[]"
+
+
+def _load_lora_state_dicts(path: str) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """Load and convert a LoRA exactly like ComfyUI's standard loader path."""
+    if comfy_utils is not None:
+        raw = comfy_utils.load_torch_file(path, safe_load=True)
+    else:
+        if _SAFETENSORS_IMPORT_ERROR is not None:
+            raise RuntimeError(f"safetensors import failed and comfy.utils is unavailable: {_SAFETENSORS_IMPORT_ERROR}")
+        raw = safetensors.torch.load_file(path, device="cpu")
+
+    converted = raw
     if comfy_lora_convert is not None:
-        try:
-            sd = comfy_lora_convert.convert_lora(sd)
-        except Exception as e:
-            LOGGER.warning("[Krea2RegionalMultiLoRA] ComfyUI lora_convert failed; using raw LoRA keys: %s", e)
-    return sd
-
-
-def _lora_pair_from_prefix(sd: Dict[str, torch.Tensor], prefix: str) -> Optional[Tuple[torch.Tensor, torch.Tensor, float, str]]:
-    """Return down/up/scale/source_key for common LoRA tensor layouts.
-
-    This intentionally uses ComfyUI's native converted key prefixes as the
-    lookup source, then extracts only plain low-rank adapters that can be
-    applied regionally as activation deltas. Non-LoRA adapter types may still be
-    globally loadable by ComfyUI, but cannot be spatially masked by this node
-    unless they expose an equivalent down/up matrix pair.
-    """
-    pairs = (
-        (".lora_down.weight", ".lora_up.weight"),
-        (".lora_down.default.weight", ".lora_up.default.weight"),
-        (".down.weight", ".up.weight"),
-        (".lora_A.weight", ".lora_B.weight"),
-        (".lora_A.default.weight", ".lora_B.default.weight"),
-        (".adapter_down.weight", ".adapter_up.weight"),
-    )
-    for down_suffix, up_suffix in pairs:
-        down_key = prefix + down_suffix
-        up_key = prefix + up_suffix
-        down = sd.get(down_key)
-        up = sd.get(up_key)
-        if torch.is_tensor(down) and torch.is_tensor(up) and down.ndim == 2 and up.ndim == 2:
-            alpha = None
-            for alpha_key in (prefix + ".alpha", prefix + ".network_alpha", prefix + ".scale"):
-                a = sd.get(alpha_key)
-                if torch.is_tensor(a):
-                    try:
-                        alpha = float(a.item())
-                        break
-                    except Exception:
-                        pass
-            rank = int(down.shape[0])
-            scale = float(alpha if alpha is not None else rank) / max(1, rank)
-            return down.contiguous(), up.contiguous(), scale, prefix
-    return None
+        converted = comfy_lora_convert.convert_lora(raw)
+    return raw, converted
 
 
 def _target_weight_key(target: Any) -> Optional[str]:
@@ -802,6 +783,12 @@ def _target_weight_key(target: Any) -> Optional[str]:
 
 def _target_is_full_weight(target: Any) -> bool:
     return isinstance(target, str)
+
+
+def _target_display(target: Any) -> str:
+    if isinstance(target, tuple):
+        return repr(target)
+    return str(target)
 
 
 def _module_name_from_weight_key(weight_key: str, name_to_module: Dict[str, Any], normalized_name_map: Dict[str, Tuple[str, Any]]) -> Optional[str]:
@@ -840,18 +827,55 @@ def _native_key_map_for_model(model_obj) -> Dict[str, Any]:
         return {}
 
 
-def _native_loaded_keys(sd: Dict[str, torch.Tensor], native_key_map: Dict[str, Any]) -> int:
+def _native_loaded_patches(sd: Dict[str, torch.Tensor], native_key_map: Dict[str, Any]) -> Tuple[Dict[Any, Any], Optional[str]]:
     if comfy_lora is None or not native_key_map:
-        return 0
+        return {}, "comfy_lora_unavailable_or_empty_key_map"
     try:
-        return len(comfy_lora.load_lora(sd, native_key_map, log_missing=False))
-    except TypeError:
+        return comfy_lora.load_lora(sd, native_key_map, log_missing=False), None
+    except TypeError as e:
         try:
-            return len(comfy_lora.load_lora(sd, native_key_map))
+            return comfy_lora.load_lora(sd, native_key_map), None
+        except Exception as fallback_e:
+            return {}, f"{type(fallback_e).__name__}: {fallback_e}"
+    except Exception as e:
+        return {}, f"{type(e).__name__}: {e}"
+
+
+def _spatial_matrices_from_patch(patch: Any, source_key: str) -> Tuple[Optional[LoraMatrices], Optional[str]]:
+    """Return ordinary low-rank Linear LoRA matrices from a ComfyUI loaded patch."""
+    if isinstance(patch, tuple) and len(patch) >= 2 and patch[0] == "lora":
+        weights = patch[1]
+        name = "lora"
+    else:
+        name = getattr(patch, "name", None)
+        weights = getattr(patch, "weights", None)
+
+    if name != "lora" or not isinstance(weights, tuple) or len(weights) < 6:
+        return None, f"adapter={type(patch).__name__}"
+
+    up, down, alpha, mid, dora_scale, reshape = weights[:6]
+    if dora_scale is not None:
+        return None, "dora"
+    if reshape is not None:
+        return None, f"reshape={reshape}"
+    if not torch.is_tensor(up) or not torch.is_tensor(down):
+        return None, "non_tensor"
+    if up.ndim != 2 or down.ndim != 2:
+        return None, f"non_linear up={tuple(up.shape)} down={tuple(down.shape)}"
+    if mid is not None:
+        if not torch.is_tensor(mid) or mid.ndim != 2:
+            return None, f"unsupported_mid={getattr(mid, 'shape', None)}"
+        return None, "mid_adapter"
+
+    rank = int(down.shape[0])
+    if alpha is None:
+        scale = 1.0
+    else:
+        try:
+            scale = float(alpha) / max(1, rank)
         except Exception:
-            return 0
-    except Exception:
-        return 0
+            scale = 1.0
+    return LoraMatrices(down=down.contiguous(), up=up.contiguous(), scale=scale, source_key=source_key), None
 
 def _iter_named_linears(model_obj, apply_to: str) -> Iterable[Tuple[str, Any]]:
     for name, module in model_obj.named_modules():
@@ -869,13 +893,24 @@ def _iter_named_linears(model_obj, apply_to: str) -> Iterable[Tuple[str, Any]]:
         yield name, module
 
 
-def _build_layer_entries(model_obj, stack: LoraStack, apply_to: str) -> Tuple[Dict[str, List[LayerPatch]], List[str]]:
+def _build_layer_entries(
+    key_map_model_obj: Any,
+    hook_model_obj: Any,
+    stack: LoraStack,
+    apply_to: str,
+) -> Tuple[Dict[str, List[LayerPatch]], List[str]]:
     all_entries: Dict[str, List[LayerPatch]] = {}
     report: List[str] = []
-    model_modules = list(_iter_named_linears(model_obj, apply_to))
+    model_modules = list(_iter_named_linears(hook_model_obj, apply_to))
     name_to_module = {name: module for name, module in model_modules}
     normalized_name_map = {_normalize_key(name): (name, module) for name, module in model_modules}
-    native_key_map = _native_key_map_for_model(model_obj)
+    native_key_map = _native_key_map_for_model(key_map_model_obj)
+    report.append(
+        "ComfyUI native key map: "
+        f"model_type={type(key_map_model_obj).__name__} hook_type={type(hook_model_obj).__name__} "
+        f"hook_linears={len(model_modules)} length={len(native_key_map)} "
+        f"sample={_format_sample([f'{k} -> {_target_display(v)}' for k, v in native_key_map.items()], 5)}"
+    )
 
     for sel_idx, selection in enumerate(stack.selections):
         if not selection.enabled:
@@ -886,58 +921,88 @@ def _build_layer_entries(model_obj, stack: LoraStack, apply_to: str) -> Tuple[Di
             report.append(f"[{sel_idx + 1}] {selection.alias}: missing LoRA '{selection.lora}'")
             continue
 
-        sd = _load_lora_state_dict(path)
-        native_loaded = _native_loaded_keys(sd, native_key_map)
+        raw_sd, sd = _load_lora_state_dicts(path)
+        loaded, load_error = _native_loaded_patches(sd, native_key_map)
+        tensor_count = sum(1 for v in raw_sd.values() if torch.is_tensor(v))
         parsed_pairs = 0
         matched = 0
         shape_mismatch = 0
         unsupported_targets = 0
+        unsupported_reasons: Dict[str, int] = {}
+        unsupported_samples: List[str] = []
+        shape_samples: List[str] = []
+        missing_samples: List[str] = []
         missing_modules = 0
 
-        # Iterate over ComfyUI's native lora-key map, not over normalized custom
-        # names. This is the compatibility fix for Krea2/Flux-style LoRA names.
-        for lora_prefix, target in native_key_map.items():
-            pair = _lora_pair_from_prefix(sd, lora_prefix)
-            if pair is None:
+        for target, patch in loaded.items():
+            matrices, reason = _spatial_matrices_from_patch(patch, _target_display(target))
+            if matrices is None:
+                unsupported_targets += 1
+                unsupported_reasons[reason or "unknown"] = unsupported_reasons.get(reason or "unknown", 0) + 1
+                if len(unsupported_samples) < 6:
+                    unsupported_samples.append(f"{_target_display(target)} ({reason or 'unknown'})")
                 continue
             parsed_pairs += 1
             if not _target_is_full_weight(target):
                 unsupported_targets += 1
+                unsupported_reasons["fused_or_sliced_target"] = unsupported_reasons.get("fused_or_sliced_target", 0) + 1
+                if len(unsupported_samples) < 6:
+                    unsupported_samples.append(f"{_target_display(target)} (fused_or_sliced_target)")
                 continue
             weight_key = _target_weight_key(target)
             if weight_key is None:
                 unsupported_targets += 1
+                unsupported_reasons["unknown_target"] = unsupported_reasons.get("unknown_target", 0) + 1
+                if len(unsupported_samples) < 6:
+                    unsupported_samples.append(f"{_target_display(target)} (unknown_target)")
                 continue
             layer_name = _module_name_from_weight_key(weight_key, name_to_module, normalized_name_map)
             if layer_name is None:
                 missing_modules += 1
+                if len(missing_samples) < 6:
+                    missing_samples.append(weight_key)
                 continue
             module = name_to_module[layer_name]
-            down, up, scale, source_key = pair
+            down, up = matrices.down, matrices.up
             weight = getattr(module, "weight", None)
             if not torch.is_tensor(weight) or weight.ndim != 2:
                 shape_mismatch += 1
+                if len(shape_samples) < 6:
+                    shape_samples.append(f"{weight_key}: target_weight={getattr(weight, 'shape', None)} down={tuple(down.shape)} up={tuple(up.shape)}")
                 continue
             out_features, in_features = int(weight.shape[0]), int(weight.shape[1])
             if int(down.shape[1]) != in_features or int(up.shape[0]) != out_features or int(up.shape[1]) != int(down.shape[0]):
                 shape_mismatch += 1
+                if len(shape_samples) < 6:
+                    shape_samples.append(f"{weight_key}: target_weight={tuple(weight.shape)} down={tuple(down.shape)} up={tuple(up.shape)}")
                 continue
             all_entries.setdefault(layer_name, []).append(
                 LayerPatch(
                     selection_index=sel_idx,
                     layer_name=layer_name,
-                    lora_key=lora_prefix,
+                    lora_key=weight_key,
                     strength=selection.strength,
-                    matrices=LoraMatrices(down=down, up=up, scale=scale, source_key=source_key),
+                    matrices=matrices,
                 )
             )
             matched += 1
 
+        unsupported_summary = ", ".join(f"{k}:{v}" for k, v in sorted(unsupported_reasons.items())) or "-"
         report.append(
             f"[{sel_idx + 1}] {selection.alias}: file={selection.lora} boxes={','.join(str(i + 1) for i in selection.boxes) or '-'} "
-            f"native_loaded={native_loaded} parsed_pairs={parsed_pairs} matched_layers={matched} "
-            f"shape_mismatch={shape_mismatch} unsupported_targets={unsupported_targets} missing_modules={missing_modules}"
+            f"path={path} tensors={tensor_count} sample_lora_keys={_format_sample(raw_sd.keys(), 5)} "
+            f"converted_sample_keys={_format_sample(sd.keys(), 5)} native_loaded={len(loaded)} "
+            f"native_load_error={load_error or '-'} native_patch_sample={_format_sample(loaded.keys(), 5)} "
+            f"parsed_pairs={parsed_pairs} matched_layers={matched} "
+            f"shape_mismatch={shape_mismatch} unsupported_targets={unsupported_targets} unsupported_reasons={unsupported_summary} "
+            f"missing_modules={missing_modules} unsupported_samples={_format_sample(unsupported_samples, 6)} "
+            f"shape_samples={_format_sample(shape_samples, 6)} missing_samples={_format_sample(missing_samples, 6)}"
         )
+        if len(loaded) > 0 and matched == 0:
+            report.append(
+                f"[{sel_idx + 1}] {selection.alias}: ERROR no spatially usable layers matched. "
+                f"Loaded patch targets sample={_format_sample(loaded.keys(), 12)}"
+            )
     return all_entries, report
 
 
@@ -1096,8 +1161,9 @@ class Krea2RegionalLoRAApply:
             return (model, _format_assignment_report(stack, []) + "\nNo external boxes were provided.")
 
         model_out = model.clone()
-        model_obj = model_out.get_model_object("diffusion_model")
-        layer_entries, lines = _build_layer_entries(model_obj, stack, apply_to)
+        hook_model_obj = model_out.get_model_object("diffusion_model")
+        key_map_model_obj = getattr(model_out, "model", hook_model_obj)
+        layer_entries, lines = _build_layer_entries(key_map_model_obj, hook_model_obj, stack, apply_to)
         aspect = float(canvas_width) / max(1.0, float(canvas_height))
         state = RegionalApplierState(
             stack=stack,
