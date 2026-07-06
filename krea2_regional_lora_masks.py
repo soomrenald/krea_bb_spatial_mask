@@ -64,6 +64,7 @@ WEB_DIRECTORY = "./web"
 WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
+NODE_VERSION = "2026-07-06.5-force-outside-global-debug"
 
 DEFAULT_LORAS_JSON = json.dumps(
     [
@@ -326,22 +327,36 @@ class RegionalApplierState:
                     continue
                 mask = self._mask_for_selection(entry.selection_index, seq_len, x.device, compute_dtype)
                 if mask is None:
-                    session.skipped_no_mask += 1
-                    if self.debug and seq_len not in session.warned:
+                    if self.outside_strength != 0.0:
+                        mask = torch.full((1, seq_len, 1), float(self.outside_strength), device=x.device, dtype=compute_dtype)
+                    else:
+                        session.skipped_no_mask += 1
+                        if self.debug and seq_len not in session.warned:
+                            session.warned.add(seq_len)
+                            LOGGER.warning(
+                                "[Krea2RegionalMultiLoRA] no usable token mask for seq_len=%s layout=%s; skipped layer %s",
+                                seq_len,
+                                session.layout,
+                                entry.layer_name,
+                            )
+                        continue
+                elif self.outside_strength != 0.0:
+                    mask = mask + (1.0 - mask) * self.outside_strength
+                if self.debug and seq_len not in session.warned:
+                    if self.outside_strength != 0.0 and mask is not None:
                         session.warned.add(seq_len)
-                        LOGGER.warning(
-                            "[Krea2RegionalMultiLoRA] no usable token mask for seq_len=%s layout=%s; skipped layer %s",
+                        LOGGER.info(
+                            "[Krea2RegionalMultiLoRA] applying LoRA delta for seq_len=%s mask_range=(%.4f, %.4f) layout=%s layer=%s",
                             seq_len,
+                            float(mask.min().detach().cpu()),
+                            float(mask.max().detach().cpu()),
                             session.layout,
                             entry.layer_name,
                         )
-                    continue
                 down, up = self._matrices_on_device(entry, x.device, compute_dtype)
                 xin = x.to(dtype=compute_dtype) if x.dtype != compute_dtype else x
                 delta = F.linear(F.linear(xin, down), up)
                 delta = delta * (entry.matrices.scale * entry.strength * self.base_strength)
-                if self.outside_strength != 0.0:
-                    mask = mask + (1.0 - mask) * self.outside_strength
                 out = out + (delta * mask).to(dtype=out.dtype)
                 session.applied_calls += 1
             return out
@@ -1081,7 +1096,12 @@ def _build_layer_entries(
 
 
 def _format_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, float, float]], include_box_coords: bool = True) -> str:
-    lines = [f"LoRA count: {len(stack.selections)}", f"BBox count: {len(boxes)}", "Assignments:"]
+    lines = [
+        f"Krea2 Regional LoRA node version: {NODE_VERSION}",
+        f"LoRA count: {len(stack.selections)}",
+        f"BBox count: {len(boxes)}",
+        "Assignments:",
+    ]
     for i, sel in enumerate(stack.selections, start=1):
         box_numbers = [b + 1 for b in sel.boxes]
         lines.append(
