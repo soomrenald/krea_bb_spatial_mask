@@ -64,7 +64,8 @@ WEB_DIRECTORY = "./web"
 WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
-NODE_VERSION = "2026-07-06.5-force-outside-global-debug"
+NODE_VERSION = "2026-07-06.6-text-unmasked-image-bbox"
+TEXT_TOKEN_STRENGTH = 1.0
 
 DEFAULT_LORAS_JSON = json.dumps(
     [
@@ -401,6 +402,8 @@ class RegionalApplierState:
             rows, cols = _infer_grid(imglen, self.image_rows, self.image_cols, self.canvas_aspect)
         if not rows or not cols or rows * cols != imglen:
             return None
+        layout.rows = rows
+        layout.cols = cols
 
         if isinstance(img_slice, (list, tuple)) and len(img_slice) >= 2:
             image_start = int(img_slice[0])
@@ -436,6 +439,8 @@ class RegionalApplierState:
         token_mask = token_mask.to(device=device, dtype=dtype)
 
         full = torch.zeros((seq_len,), device=device, dtype=dtype)
+        if image_start > 0 and TEXT_TOKEN_STRENGTH != 0.0:
+            full[:image_start] = float(TEXT_TOKEN_STRENGTH)
         full[image_start:image_start + imglen] = token_mask
         full = full.view(1, seq_len, 1)
         session.mask_cache[key] = full
@@ -1098,6 +1103,7 @@ def _build_layer_entries(
 def _format_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, float, float]], include_box_coords: bool = True) -> str:
     lines = [
         f"Krea2 Regional LoRA node version: {NODE_VERSION}",
+        f"Mask semantics: text_token_strength={TEXT_TOKEN_STRENGTH:.3f}, image_tokens=bbox_mask, padding_tokens=outside_strength",
         f"LoRA count: {len(stack.selections)}",
         f"BBox count: {len(boxes)}",
         "Assignments:",
