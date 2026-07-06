@@ -1,133 +1,114 @@
-# ComfyUI Krea2 Regional LoRA Masks
+# ComfyUI Krea2 Regional Multi-LoRA
 
-Custom ComfyUI nodes for applying multiple Krea2 character LoRAs to separate spatial regions in the same generation.
+Standalone ComfyUI custom nodes for applying multiple Krea2 character LoRAs to distinct spatial regions with a separate ordered loader node.
 
-This package is based on the activation-delta masking premise used by Fedor/CliffNodes' Krea2 regional multi-LoRA node, but implements the main safety patches I would want before relying on it:
+## What this version does
 
-- masks the LoRA **delta**, not the prompt or attention bias
-- targets Krea2's actual `text tokens -> image tokens -> padding` layout when the forward-call tensors expose it
-- avoids the fragile assumption that image tokens are always the final `N` sequence tokens
-- skips text-fusion/time/final layers by default
-- validates LoRA matrix shapes against live Linear layers before installing hooks
-- supports manual token-grid overrides when ComfyUI/Krea2 wrappers do not expose enough layout metadata
-- includes a mask preview node
+- standalone implementation
+- separate **Multi LoRA Loader** node
+- ordered LoRA list with alias, file, strength, and assigned box indices
+- one LoRA can target **multiple independent boxes**
+- preview node overlays **box numbers and LoRA aliases** so it is easy to see what each drawn box maps to
+- applies each LoRA by masking its activation delta on image tokens
 
 ## Nodes
 
-### Krea2 Regional LoRA Masks (patched)
+### 1. Krea2 Multi LoRA Loader
+
+This is where the user selects as many LoRAs as desired.
+
+Per LoRA row:
+
+- `enabled`
+- `alias`
+- `file`
+- `strength`
+- `boxes`
+- `color`
+
+`boxes` uses **1-based box numbers** and supports forms like:
+
+- `1`
+- `1,3,4`
+- `2-5`
+- `1,3-5`
+
+That means one LoRA can be applied to multiple separately drawn boxes.
+
+### 2. Krea2 Regional LoRA Apply
 
 Inputs:
 
-- `model`: Krea2 MODEL from `UNETLoader`
-- `regions_json`: list of LoRA regions
-- `canvas_width`, `canvas_height`: coordinate reference for pixel-space boxes
-- `bboxes`: optional `BOUNDING_BOX` input from a box builder node
-- `split_mode`: fallback region splitting if no bbox is supplied
-- `seam_feather`: soft edge width as a fraction of the token grid
-- `outside_strength`: deliberate outside-region leak; keep at `0.0` for identity separation
-- `base_strength`: global multiplier over all region strengths
-- `token_offset_mode`:
-  - `auto_txt_img_pad_safe`: preferred; uses Krea2 text/image layout when inferable
-  - `manual`: uses `manual_image_start`
-  - `legacy_trailing`: old fallback; assumes the image tokens are the last N tokens
-- `image_rows`, `image_cols`: manual image token grid override. Leave `0/0` unless mask placement is wrong.
-- `apply_to`:
-  - `krea_blocks_only`: recommended default
-  - `all_matched_linears`: experimental, more invasive
+- `model`: Krea2 model from `UNETLoader`
+- `lora_stack`: output of **Krea2 Multi LoRA Loader**
+- `bboxes`: modern `BOUNDING_BOX` input
+- `kj_bboxes`: legacy `BBOX` input
+- `ideogram_prompt_json`: fallback prompt JSON input
 
-Output:
+The node uses the ordered LoRA stack plus external boxes to build the masked regional application.
 
-- patched `MODEL`
-- text `report`
+### 3. Krea2 Regional LoRA Preview
 
-### Krea2 Region Mask Preview
+Draws the boxes and labels them like:
 
-Builds the same rectangular masks at preview resolution so you can check region placement before sampling.
+- `box 1`
+- `[1] character_a`
+- `[2] character_b`
 
-## `regions_json` schema
+This helps the user identify which LoRA entry corresponds to which drawn box assignment.
+
+## Typical workflow
+
+```text
+bbox-drawing node -> Krea2 Regional LoRA Preview
+Krea2 Multi LoRA Loader -> Krea2 Regional LoRA Preview
+
+UNETLoader Krea2 -> Krea2 Regional LoRA Apply -> KSampler
+Krea2 Multi LoRA Loader -> Krea2 Regional LoRA Apply
+bbox-drawing node -> Krea2 Regional LoRA Apply
+```
+
+## Example loader configuration
 
 ```json
 [
   {
-    "name": "left_character",
+    "enabled": true,
+    "alias": "alice",
     "lora": "alice_krea2.safetensors",
     "strength": 1.0,
-    "enabled": true,
-    "bbox": {"x": 0.05, "y": 0.05, "w": 0.40, "h": 0.85}
+    "boxes": "1,3",
+    "color": "#ff5f57"
   },
   {
-    "name": "right_character",
-    "lora": "bob_krea2.safetensors",
-    "strength": 1.0,
     "enabled": true,
-    "bbox": {"x": 0.55, "y": 0.05, "w": 0.40, "h": 0.85}
+    "alias": "bob",
+    "lora": "bob_krea2.safetensors",
+    "strength": 0.95,
+    "boxes": "2",
+    "color": "#5fb3ff"
   }
 ]
 ```
 
-Coordinates may be normalized `0..1` or pixels relative to `canvas_width` / `canvas_height`.
+In that example:
 
-If a `BOUNDING_BOX` input is connected, external boxes override JSON boxes by row order.
+- Alice applies to **box 1 and box 3**
+- Bob applies to **box 2**
 
-## Recommended workflow
+## Notes
 
-```text
-UNETLoader Krea2 -> Krea2 Regional LoRA Masks (patched) -> KSampler
-CLIPLoader krea2 -> prompt conditioning as usual
-VAELoader qwen_image_vae -> decode as usual
-```
-
-Recommended starting values:
-
-```text
-seam_feather: 0.04-0.08
-outside_strength: 0.0
-base_strength: 1.0
-per-region strength: 0.8-1.1
-token_offset_mode: auto_txt_img_pad_safe
-apply_to: krea_blocks_only
-```
-
-Use boxes around face and upper torso. Avoid large overlapping boxes unless you intentionally want blending.
+- Use `bbox_list_format=xywh` for legacy KJNodes `BBOX`
+- Use `BOUNDING_BOX` directly when possible
+- Keep `outside_strength=0.0` for best identity separation
+- Start `seam_feather` around `0.04` to `0.08`
 
 ## Installation
 
-Copy this folder into:
+Copy the folder into:
 
 ```bash
 ComfyUI/custom_nodes/ComfyUI-Krea2-Regional-LoRA-Masks
 ```
 
 Restart ComfyUI.
-
-Requirements are already present in normal ComfyUI installs:
-
-- `torch`
-- `safetensors`
-- recent ComfyUI with `comfy.patcher_extension` and `ModelPatcher.add_wrapper_with_key`
-
-## Important limitations
-
-This is not guaranteed to work with every Krea2 ComfyUI loader fork. The safest path depends on whether the Krea2 forward wrapper exposes enough information to infer:
-
-```text
-txtlen, imglen, padding
-```
-
-If generations look like the wrong region is being affected:
-
-1. Turn `debug_logging` on.
-2. Set `image_rows` and `image_cols` manually if the inferred token grid is wrong.
-3. Use `manual` token offset mode and set `manual_image_start` to the text-token count if auto inference fails.
-4. Use `legacy_trailing` only as a compatibility fallback.
-
-## Why this should reduce character bleed
-
-A normal LoRA modifies every matching layer globally. This node adds each LoRA's activation delta only where the spatial token mask is nonzero:
-
-```python
-output = base_output + mask * ((x @ down.T) @ up.T) * strength
-```
-
-Outside the mask, that LoRA contributes zero to the live activations.
-

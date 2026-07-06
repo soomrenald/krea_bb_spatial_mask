@@ -1,22 +1,26 @@
+import importlib.util
 import pathlib
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-
-from krea2_regional_lora_masks import _rect_token_mask, _bbox_from_any, _infer_grid
-
-
-def test_bbox_normalized():
-    assert _bbox_from_any({"x": 10, "y": 20, "w": 30, "h": 40}, 100, 200) == (0.1, 0.1, 0.4, 0.3)
+MODULE_PATH = pathlib.Path(__file__).resolve().parents[1] / "krea2_regional_lora_masks.py"
+spec = importlib.util.spec_from_file_location("k2mod", MODULE_PATH)
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
 
 
-def test_grid_factor():
-    assert _infer_grid(64, 0, 0, 1.0) == (8, 8)
+def test_parse_box_indices():
+    assert mod._parse_box_indices("1,3-5") == [0, 2, 3, 4]
+    assert mod._parse_box_indices([1, "3-4"]) == [0, 2, 3]
 
 
-def test_mask_shape():
-    m = _rect_token_mask(8, 8, (0.0, 0.0, 0.5, 1.0), 0.05)
-    assert tuple(m.shape) == (64,)
-    assert float(m.max()) <= 1.0
-    assert float(m.min()) >= 0.0
+def test_bbox_xywh():
+    box = mod._bbox_from_any((100, 200, 300, 400), 1000, 1000, "xywh")
+    assert box == (0.1, 0.2, 0.4, 0.6)
+
+
+def test_rect_mask_shape():
+    mask = mod._rect_token_mask(8, 8, (0.25, 0.25, 0.75, 0.75), 0.05)
+    assert tuple(mask.shape) == (64,)
+    assert float(mask.max()) <= 1.0
+    assert float(mask.min()) >= 0.0
