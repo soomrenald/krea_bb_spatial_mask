@@ -65,9 +65,10 @@ WEB_DIRECTORY = "./web"
 WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
-NODE_VERSION = "2026-07-06.12-runtime-mask-coverage-debug"
+NODE_VERSION = "2026-07-06.13-output-delta-blend"
 TEXT_TOKEN_STRENGTH = 0.0
 KREA_OUTPUT_IMAGE_INDICATOR = 2
+OUTPUT_DELTA_BLEND_MODE = True
 
 DEFAULT_LORAS_JSON = json.dumps(
     [
@@ -198,6 +199,7 @@ class RuntimeSession:
     geometry_y_norm: Optional[torch.Tensor] = None
     geometry_rows: Optional[int] = None
     geometry_cols: Optional[int] = None
+    output_blend_passes: int = 0
 
 
 class RegionalApplierState:
@@ -245,6 +247,8 @@ class RegionalApplierState:
         try:
             if model_obj is None:
                 return executor(*args, **kwargs)
+            if OUTPUT_DELTA_BLEND_MODE:
+                return self._wrapper_output_delta_blend(executor, model_obj, args, kwargs)
             original_backbone = self._install_krea_backbone_capture(model_obj)
             name_to_module = dict(model_obj.named_modules())
             for layer_name, entries in self.layer_entries.items():
@@ -288,6 +292,98 @@ class RegionalApplierState:
                 except Exception:
                     pass
             self.session = None
+
+    def _wrapper_output_delta_blend(self, executor, model_obj: Any, args: Sequence[Any], kwargs: Dict[str, Any]):
+        session = self.session
+        assert session is not None
+        name_to_module = dict(model_obj.named_modules())
+        if self.debug:
+            LOGGER.info(
+                "[Krea2RegionalMultiLoRA] output-delta blend mode enabled; baseline plus one global LoRA pass per enabled selection"
+            )
+        base = executor(*args, **kwargs)
+        if not torch.is_tensor(base):
+            return base
+        result = base
+        pass_reports: List[str] = []
+        for selection_index, selection in enumerate(self.stack.selections):
+            if not selection.enabled:
+                continue
+            if not [i for i in selection.boxes if 0 <= i < len(self.boxes)]:
+                continue
+            handles = self._install_selection_hooks(name_to_module, selection_index, force_global=True)
+            if not handles:
+                continue
+            try:
+                session.output_blend_passes += 1
+                lora_out = executor(*args, **kwargs)
+            finally:
+                for h in handles:
+                    try:
+                        h.remove()
+                    except Exception:
+                        pass
+            if not torch.is_tensor(lora_out) or lora_out.shape != base.shape:
+                if self.debug:
+                    LOGGER.warning(
+                        "[Krea2RegionalMultiLoRA] output blend skipped alias=%s because output shape changed: base=%s lora=%s",
+                        selection.alias,
+                        tuple(base.shape),
+                        getattr(lora_out, "shape", None),
+                    )
+                continue
+            mask = self._output_mask_for_selection(selection_index, base)
+            if mask is None:
+                if self.outside_strength != 0.0:
+                    mask = torch.full(_spatial_broadcast_shape(base), float(self.outside_strength), device=base.device, dtype=base.dtype)
+                else:
+                    continue
+            elif self.outside_strength != 0.0:
+                mask = mask + (1.0 - mask) * self.outside_strength
+            delta = lora_out - base
+            result = result + delta * mask
+            if self.debug:
+                pass_reports.append(
+                    f"{selection.alias}:mask_range=({float(mask.min().detach().cpu()):.4f},{float(mask.max().detach().cpu()):.4f}) "
+                    f"mask_sum={float(mask.sum().detach().cpu()):.2f} "
+                    f"delta_mean={float(delta.abs().mean().detach().cpu()):.6f} delta_max={float(delta.abs().max().detach().cpu()):.6f}"
+                )
+        if self.debug:
+            LOGGER.info(
+                "[Krea2RegionalMultiLoRA] output blend stats: passes=%d observed_seq_lens=%s applied_hook_calls=%d reports=%s",
+                session.output_blend_passes,
+                dict(sorted(session.observed_seq_lens.items())),
+                session.applied_calls,
+                _format_sample(pass_reports, 8),
+            )
+        return result
+
+    def _install_selection_hooks(self, name_to_module: Dict[str, Any], selection_index: int, force_global: bool) -> List[Any]:
+        handles = []
+        for layer_name, entries in self.layer_entries.items():
+            selected = [entry for entry in entries if entry.selection_index == selection_index]
+            if not selected:
+                continue
+            module = name_to_module.get(layer_name)
+            if module is None:
+                continue
+            handles.append(module.register_forward_hook(self._make_forward_hook(selected, force_global=force_global)))
+        return handles
+
+    def _output_mask_for_selection(self, selection_index: int, output: torch.Tensor) -> Optional[torch.Tensor]:
+        if output.ndim < 4:
+            return None
+        selection = self.stack.selections[selection_index]
+        box_indices = [i for i in selection.boxes if 0 <= i < len(self.boxes)]
+        if not box_indices:
+            return None
+        rows = int(output.shape[-2])
+        cols = int(output.shape[-1])
+        token_mask = torch.zeros((rows * cols,), dtype=torch.float32)
+        for box_index in box_indices:
+            token_mask = torch.maximum(token_mask, _rect_token_mask(rows, cols, self.boxes[box_index], self.seam_feather))
+        mask = token_mask.view(1, 1, rows, cols).to(device=output.device, dtype=output.dtype)
+        return mask
 
     def _install_krea_backbone_capture(self, model_obj: Any) -> Optional[Any]:
         original_backbone = getattr(model_obj, "_backbone", None)
@@ -451,7 +547,7 @@ class RegionalApplierState:
             layout.imglen = h * w
         layout.source = (layout.source + f"+latent_candidates_{h}x{w}_p{patch_size}").strip("+")
 
-    def _make_forward_hook(self, entries: List[LayerPatch]):
+    def _make_forward_hook(self, entries: List[LayerPatch], force_global: bool = False):
         def hook(module, inputs, output):
             session = self.session
             if session is None or not torch.is_tensor(output) or not inputs:
@@ -470,7 +566,7 @@ class RegionalApplierState:
                 selection = self.stack.selections[entry.selection_index]
                 if not selection.enabled:
                     continue
-                if entry.mask_scope == "global_conditioning":
+                if force_global or entry.mask_scope == "global_conditioning":
                     mask = torch.ones((1, seq_len, 1), device=x.device, dtype=compute_dtype)
                 else:
                     mask = self._mask_for_selection(entry.selection_index, seq_len, x.device, compute_dtype)
@@ -985,6 +1081,14 @@ def _reshape_token_mask(mask: torch.Tensor, target_ndim: int) -> torch.Tensor:
     return mask.view(*([1] * (target_ndim - 2)), mask.shape[-2], 1)
 
 
+def _spatial_broadcast_shape(tensor: torch.Tensor) -> Tuple[int, ...]:
+    if tensor.ndim >= 4:
+        return (1, 1, int(tensor.shape[-2]), int(tensor.shape[-1]))
+    if tensor.ndim >= 2:
+        return (1,) * (tensor.ndim - 1) + (1,)
+    return (1,)
+
+
 # -------------------- bbox parsing --------------------
 
 
@@ -1438,6 +1542,7 @@ def _format_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, 
         f"Krea2 Regional LoRA node version: {NODE_VERSION}",
         f"Mask semantics: text_token_strength={TEXT_TOKEN_STRENGTH:.3f}, image_tokens=bbox_mask, padding_tokens=outside_strength",
         "Mask scope: txtfusion/textfusion LoRA layers apply globally as conditioning; image/block layers apply regionally",
+        "Execution mode: output-delta blend (baseline denoiser pass plus one global LoRA pass per enabled LoRA, blended by bbox on output latent)",
         "Mask layout: Krea _backbone position_ids/indicator first; fallback chooses image span from live seq_len/text length before latent-grid guesses",
         "Runtime debug: logs observed_seq_lens plus per-LoRA mask source/start/imglen/grid/sum/max/nonzero when debug_logging=True",
         f"LoRA count: {len(stack.selections)}",
