@@ -1,0 +1,3407 @@
+{
+  "id": "krea-regional-lora-crop-composite-example",
+  "revision": 0,
+  "last_node_id": 91,
+  "last_link_id": 260,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        169.7753394796684,
+        -1827.432090204398
+      ],
+      "size": [
+        270,
+        107.328125
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            22
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "UNETLoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      },
+      "widgets_values": [
+        "turbo.safetensors",
+        "default"
+      ],
+      "color": "#009933"
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoader",
+      "pos": [
+        172.8891228627968,
+        -1653.8166464535902
+      ],
+      "size": [
+        270,
+        139.328125
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            11,
+            12
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPLoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      },
+      "widgets_values": [
+        "qwen3vl_4b_fp8_scaled.safetensors",
+        "krea2",
+        "default"
+      ],
+      "color": "#009933"
+    },
+    {
+      "id": 3,
+      "type": "VAELoader",
+      "pos": [
+        167.2935576508915,
+        -1469.9311731424891
+      ],
+      "size": [
+        270,
+        79.328125
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            13,
+            215,
+            228,
+            242,
+            255
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAELoader",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      },
+      "widgets_values": [
+        "qwen_image_vae.safetensors"
+      ],
+      "color": "#009933"
+    },
+    {
+      "id": 5,
+      "type": "Ideogram4PromptBuilderKJ",
+      "pos": [
+        624.944482751301,
+        -1187.2044586710754
+      ],
+      "size": [
+        480,
+        815.328125
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "showAdvanced": true,
+      "inputs": [
+        {
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "import_json",
+          "shape": 7,
+          "type": "STRING",
+          "link": null
+        },
+        {
+          "name": "bboxes",
+          "shape": 7,
+          "type": "BOUNDING_BOX",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "links": [
+            16
+          ]
+        },
+        {
+          "name": "preview",
+          "type": "IMAGE",
+          "links": [
+            2
+          ]
+        },
+        {
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "links": [
+            199,
+            204,
+            211,
+            238
+          ]
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "links": [
+            197,
+            209,
+            236
+          ]
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": [
+            198,
+            210,
+            237
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Ideogram4PromptBuilderKJ",
+        "dockPinned": true,
+        "dockGraph": {
+          "x": -394.12365449044097,
+          "y": 856.9695641014657,
+          "w": 951,
+          "h": 784
+        },
+        "docked": true,
+        "dockMin": false
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        "",
+        "sunny midday scene at an idyllic beach, bright blue water and other people bathing in the background",
+        "photo",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "[{\"type\":\"obj\",\"text\":\"\",\"desc\":\"lface, a naked woman with medium brown hair in a messy updo, arm tattoos, medium c-cup breasts, and short natural pubic hair\",\"palette\":[],\"x\":0.6449915343842851,\"y\":0.41984726875141026,\"w\":0.305,\"h\":0.56},{\"type\":\"obj\",\"text\":\"\",\"desc\":\"sface, a lanky, athletic, naked man with light skin, short brown hair, tattoos on arms and torso, \",\"palette\":[],\"x\":0.13844055008042266,\"y\":0.26659015324547475,\"w\":0.374,\"h\":0.554}]",
+        25,
+        "when empty",
+        "compact",
+        "normalized",
+        "yx"
+      ],
+      "ideo": {
+        "boxes": [
+          {
+            "type": "obj",
+            "text": "",
+            "desc": "lface, a naked woman with medium brown hair in a messy updo, arm tattoos, medium c-cup breasts, and short natural pubic hair",
+            "palette": [],
+            "x": 0.6449915343842851,
+            "y": 0.41984726875141026,
+            "w": 0.305,
+            "h": 0.56
+          },
+          {
+            "type": "obj",
+            "text": "",
+            "desc": "sface, a lanky, athletic, naked man with light skin, short brown hair, tattoos on arms and torso, small flaccid penis",
+            "palette": [],
+            "x": 0.13844055008042266,
+            "y": 0.26659015324547475,
+            "w": 0.374,
+            "h": 0.554
+          }
+        ],
+        "palette": [],
+        "importMode": "when empty",
+        "outputFormat": "compact",
+        "coordMode": "normalized",
+        "bboxOrder": "yx",
+        "dock": {
+          "pinned": true,
+          "graph": {
+            "x": -394.12365449044097,
+            "y": 856.9695641014657,
+            "w": 951,
+            "h": 784
+          },
+          "panelH": 150,
+          "min": false
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "PreviewImage",
+      "pos": [
+        380.2541358070101,
+        -1166.3480588318048
+      ],
+      "size": [
+        225,
+        283.3125
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 8,
+      "type": "CLIPTextEncode",
+      "pos": [
+        1633.8632875470157,
+        -381.3442596495049
+      ],
+      "size": [
+        503.59375,
+        436.34375
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 11
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 16
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            52
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      },
+      "widgets_values": [
+        "sface. facial. photograph of a man, sface: a light-skinned adult man with short brown hair, a full dark beard, and chest and arm tattoos, lying on a soft bed on his back with his arms and legs spread and bound with white rope. his wrists are bound to the headboard with ropes. his ankles are bound with ropes and tied to the bed's corners. The ropes connecting his ankles and wrists to the bed frame are tight, stretching his legs out spreadeagle. he has a very small circumcised flaccid penis which is leaking a small amount of creamy semen, shaved pubic hair and his anus is leaking a trickle of thick creamy semen. he has cum on his face.\n\ndownward angle shot from the foot of the bed viewing sface's small flaccid penis and anus as the focus of the image. the shot is taken from several feet away from the POV of a man with a huge, thick cock, Man2, who has just ejaculated onto sface, right before the photo was taken, so that sface has cum on his lower abdomen, thighs, and small flaccid penis. The semen that is on sface's flaccid penis is thick, white and creamy, and it drips down onto his small scrotum and between his ass cheeks. Man2 holds his huge cock with his right hand, and semen drips from between and around his fingers.\n\nThere are six other men with varied skin tones, heights and weights in the scene. They are all fit and athletic, but some are more muscular than others. None are fat, and none are African. Two of the other men, Man3 and Man4, kneel on the bed near sface's head. Man3 and Man4 have huge, erect, veiny penises, and they are masturbating their cocks so that cum drips down onto sface's face giving him a facial. sface has cum all over his face.\n\nThe remaining four men, Man5, Man6, Man7 and Man8, are all naked and have huge flaccid cocks, in a variety of shapes and sizes. They stand around the bed chatting with each other, and gesturing towards sface, as they wait their turn to fuck him in the ass.\n\nfull-frame mirrorless camera, 24mm lens, f/8, ISO 400, 1/250s, deep depth of field, sharp focus across the entire room, evenly lit editorial interior photography, natural proportions, realistic dynamic range, crisp fine detail, no motion blur, no background blur"
+      ],
+      "color": "#009933"
+    },
+    {
+      "id": 9,
+      "type": "CLIPTextEncode",
+      "pos": [
+        1616.940888387684,
+        89.82660950997138
+      ],
+      "size": [
+        538.5625,
+        115.328125
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 12
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "links": [
+            3,
+            220,
+            247
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CLIPTextEncode",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      },
+      "widgets_values": [
+        "low quality, blurry, tiger, bad anatomy,  missing limbs, logo, watermark"
+      ],
+      "color": "#009933"
+    },
+    {
+      "id": 10,
+      "type": "RandomNoise",
+      "pos": [
+        2347.203181024177,
+        -305.4711220774484
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "NOISE",
+          "type": "NOISE",
+          "links": [
+            5
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RandomNoise",
+        "cnr_id": "comfy-core",
+        "ver": "0.8.2",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        101867992357416,
+        "fixed"
+      ]
+    },
+    {
+      "id": 11,
+      "type": "CFGGuider",
+      "pos": [
+        2375.620025037992,
+        -175.73417149516968
+      ],
+      "size": [
+        270,
+        127.328125
+      ],
+      "flags": {},
+      "order": 24,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 200
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 53
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "links": [
+            6
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CFGGuider",
+        "cnr_id": "comfy-core",
+        "ver": "0.11.0"
+      },
+      "widgets_values": [
+        1
+      ]
+    },
+    {
+      "id": 12,
+      "type": "KSamplerSelect",
+      "pos": [
+        2380.363569638475,
+        17.576437289513024
+      ],
+      "size": [
+        270,
+        79.328125
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "links": [
+            7,
+            224,
+            251
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "KSamplerSelect",
+        "cnr_id": "comfy-core",
+        "ver": "0.8.2",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [
+        "euler"
+      ]
+    },
+    {
+      "id": 13,
+      "type": "BasicScheduler",
+      "pos": [
+        2380.391001900663,
+        204.1835914229075
+      ],
+      "size": [
+        270,
+        143.328125
+      ],
+      "flags": {},
+      "order": 25,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 201
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            8
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BasicScheduler",
+        "cnr_id": "comfy-core",
+        "ver": "0.9.2"
+      },
+      "widgets_values": [
+        "simple",
+        8,
+        1
+      ]
+    },
+    {
+      "id": 14,
+      "type": "VAEDecode",
+      "pos": [
+        2402.3861014961135,
+        432.64132230896234
+      ],
+      "size": [
+        225,
+        71.328125
+      ],
+      "flags": {},
+      "order": 28,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 4
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 13
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            10,
+            207,
+            229
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 15,
+      "type": "EmptyLatentImage",
+      "pos": [
+        1974.9498902526889,
+        651.2777545396923
+      ],
+      "size": [
+        270,
+        143.328125
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "EmptyLatentImage",
+        "cnr_id": "comfy-core",
+        "ver": "0.25.0"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1
+      ]
+    },
+    {
+      "id": 16,
+      "type": "SamplerCustomAdvanced",
+      "pos": [
+        2307.12959675482,
+        599.3805411815667
+      ],
+      "size": [
+        358.9375,
+        455.375
+      ],
+      "flags": {},
+      "order": 27,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": 5
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 6
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 7
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 8
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 9
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "links": [
+            4
+          ]
+        },
+        {
+          "name": "denoised_output",
+          "type": "LATENT",
+          "links": []
+        }
+      ],
+      "title": "\u26a1SamplerCustomAdvanced\u26a1",
+      "properties": {
+        "Node name for S&R": "SamplerCustomAdvanced",
+        "cnr_id": "comfy-core",
+        "ver": "0.8.2",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65
+      },
+      "widgets_values": [],
+      "color": "#009933"
+    },
+    {
+      "id": 17,
+      "type": "PreviewImage",
+      "pos": [
+        3251.361215536593,
+        -274.8033978432637
+      ],
+      "size": [
+        707.03125,
+        680.75
+      ],
+      "flags": {},
+      "order": 29,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 10
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 18,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        1021.7581658332006,
+        -1425.4865294694955
+      ],
+      "size": [
+        270,
+        111.328125
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 22
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            86
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "krea_SNOFS.safetensors",
+        0.8
+      ]
+    },
+    {
+      "id": 19,
+      "type": "PreviewAny",
+      "pos": [
+        2507.458283922345,
+        -1771.475634356579
+      ],
+      "size": [
+        400.53125,
+        368.8125
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 206
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "id": 27,
+      "type": "ConditioningKrea2Rebalance",
+      "pos": [
+        2308.605844621984,
+        -505.8107976193668
+      ],
+      "size": [
+        403.71875,
+        139.328125
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 52
+        }
+      ],
+      "outputs": [
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "links": [
+            53,
+            219,
+            246
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ConditioningKrea2Rebalance",
+        "aux_id": "nova452/ComfyUI-ConditioningKrea2Rebalance",
+        "ver": "66623d9efd354a01ac04df7076aff47990f6d1a3"
+      },
+      "widgets_values": [
+        4,
+        "1.0,1.0,1.0,1.0,1.0,1.0,1.0,2.5,5.0,1.1,4.0,1.0"
+      ]
+    },
+    {
+      "id": 28,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        1337.2878658174923,
+        -1344.336519586895
+      ],
+      "size": [
+        270,
+        111.328125
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 86
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            46
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "krea_realism.safetensors",
+        0.7
+      ]
+    },
+    {
+      "id": 29,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        1657.3840743249839,
+        -1324.1726540839513
+      ],
+      "size": [
+        270,
+        111.328125
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 46
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            47
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "Krea-2-Turbo-Projector-Scale-LoRA-Diffusers.safetensors",
+        1
+      ]
+    },
+    {
+      "id": 30,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        1937.801386869095,
+        -1322.6885847771916
+      ],
+      "size": [
+        270,
+        111.328125
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 47
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            48
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "Krea-2-Turbo-Projector-Scale-LoRA-Diffusers.safetensors",
+        1
+      ]
+    },
+    {
+      "id": 31,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        2218.087430171746,
+        -1327.3145470275665
+      ],
+      "size": [
+        270,
+        111.328125
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 48
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            49
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "Krea-2-Turbo-Projector-Scale-LoRA-Diffusers.safetensors",
+        1
+      ]
+    },
+    {
+      "id": 32,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        2490.844180775745,
+        -1323.9224739362317
+      ],
+      "size": [
+        270,
+        111.328125
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 49
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            50
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "Krea-2-Turbo-Projector-Scale-LoRA-Diffusers.safetensors",
+        1
+      ]
+    },
+    {
+      "id": 33,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        2752.116945942363,
+        -1355.0978612955273
+      ],
+      "size": [
+        270,
+        111.328125
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 50
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            195,
+            200,
+            201,
+            212,
+            239
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "Krea-2-Turbo-Projector-Scale-LoRA-Diffusers.safetensors",
+        0.03
+      ]
+    },
+    {
+      "id": 37,
+      "type": "PreviewImage",
+      "pos": [
+        2937.08233608077,
+        -1017.6654372335986
+      ],
+      "size": [
+        477.71875,
+        651.25
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 205
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 38,
+      "type": "PreviewAny",
+      "pos": [
+        1602.357774255091,
+        -1772.3699283998383
+      ],
+      "size": [
+        373.15625,
+        383.1875
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 194
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "id": 39,
+      "type": "PreviewAny",
+      "pos": [
+        2094.392296668645,
+        -1795.6394566607207
+      ],
+      "size": [
+        381.5,
+        425.8125
+      ],
+      "flags": {},
+      "order": 26,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 202
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "id": 65,
+      "type": "Krea2MultiLoRALoader",
+      "pos": [
+        1172.2407164821734,
+        -1162.916424296652
+      ],
+      "size": [
+        400,
+        735.328125
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "lora_stack",
+          "type": "KREA2_MULTI_LORA_STACK",
+          "links": [
+            196,
+            203,
+            208,
+            213,
+            235,
+            240
+          ]
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            194
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2MultiLoRALoader"
+      },
+      "widgets_values": [
+        "[\n  {\n    \"enabled\": true,\n    \"alias\": \"lface\",\n    \"lora\": \"krearaw.safetensors\",\n    \"strength\": 1.6,\n    \"boxes\": \"1\",\n    \"color\": \"#ff5f57\"\n  },\n  {\n    \"enabled\": true,\n    \"alias\": \"sface\",\n    \"lora\": \"sface_merge.safetensors\",\n    \"strength\": 1.6,\n    \"boxes\": \"2\",\n    \"color\": \"#5fb3ff\"\n  }\n]",
+        null
+      ]
+    },
+    {
+      "id": 66,
+      "type": "Krea2RegionalLoRAApply",
+      "pos": [
+        1794.0919458465294,
+        -1162.0630421467615
+      ],
+      "size": [
+        400,
+        695.328125
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 195
+        },
+        {
+          "name": "lora_stack",
+          "type": "KREA2_MULTI_LORA_STACK",
+          "link": 196
+        },
+        {
+          "name": "kj_bboxes",
+          "shape": 7,
+          "type": "BBOX",
+          "link": null
+        },
+        {
+          "name": "canvas_width",
+          "type": "INT",
+          "widget": {
+            "name": "canvas_width"
+          },
+          "link": 197
+        },
+        {
+          "name": "canvas_height",
+          "type": "INT",
+          "widget": {
+            "name": "canvas_height"
+          },
+          "link": 198
+        },
+        {
+          "name": "bboxes",
+          "shape": 7,
+          "type": "BOUNDING_BOX",
+          "widget": {
+            "name": "bboxes"
+          },
+          "link": 199
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": []
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            202
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2RegionalLoRAApply"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        "xywh",
+        0.05,
+        1,
+        1,
+        "auto_txt_img_pad_safe",
+        0,
+        0,
+        0,
+        "krea_blocks_only",
+        true,
+        {
+          "x": 0,
+          "y": 0,
+          "width": 512,
+          "height": 512
+        },
+        0,
+        0,
+        512,
+        512,
+        ""
+      ],
+      "title": "Bypassed old direct regional LoRA apply - use crop/composite path below"
+    },
+    {
+      "id": 67,
+      "type": "Krea2RegionalLoRAPreview",
+      "pos": [
+        2343.321884147521,
+        -1124.8458684299007
+      ],
+      "size": [
+        400,
+        451.328125
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "lora_stack",
+          "type": "KREA2_MULTI_LORA_STACK",
+          "link": 203
+        },
+        {
+          "name": "kj_bboxes",
+          "shape": 7,
+          "type": "BBOX",
+          "link": null
+        },
+        {
+          "name": "bboxes",
+          "shape": 7,
+          "type": "BOUNDING_BOX",
+          "widget": {
+            "name": "bboxes"
+          },
+          "link": 204
+        }
+      ],
+      "outputs": [
+        {
+          "name": "preview",
+          "type": "IMAGE",
+          "links": [
+            205
+          ]
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            206
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2RegionalLoRAPreview"
+      },
+      "widgets_values": [
+        1024,
+        1024,
+        1024,
+        1024,
+        "xywh",
+        {
+          "x": 0,
+          "y": 0,
+          "width": 512,
+          "height": 512
+        },
+        0,
+        0,
+        512,
+        512,
+        ""
+      ]
+    },
+    {
+      "id": 68,
+      "type": "Krea2RegionalLoRACropExtract",
+      "pos": [
+        2950,
+        -200
+      ],
+      "size": [
+        430,
+        520
+      ],
+      "flags": {},
+      "order": 51,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 207
+        },
+        {
+          "name": "lora_stack",
+          "type": "KREA2_MULTI_LORA_STACK",
+          "link": 208
+        },
+        {
+          "name": "kj_bboxes",
+          "type": "BBOX",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "canvas_width",
+          "type": "INT",
+          "link": 209,
+          "widget": {
+            "name": "canvas_width"
+          }
+        },
+        {
+          "name": "canvas_height",
+          "type": "INT",
+          "link": 210,
+          "widget": {
+            "name": "canvas_height"
+          }
+        },
+        {
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "link": 211,
+          "shape": 7,
+          "widget": {
+            "name": "bboxes"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "crop_image",
+          "type": "IMAGE",
+          "links": [
+            214
+          ]
+        },
+        {
+          "name": "crop_mask",
+          "type": "MASK",
+          "links": [
+            217
+          ]
+        },
+        {
+          "name": "crop_info",
+          "type": "KREA2_REGION_CROP",
+          "links": [
+            231
+          ]
+        },
+        {
+          "name": "alias",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "lora_name",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "lora_strength",
+          "type": "FLOAT",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2RegionalLoRACropExtract"
+      },
+      "widgets_values": [
+        1,
+        1024,
+        1024,
+        "xywh",
+        96,
+        0.15,
+        512,
+        16,
+        0.03,
+        16,
+        12,
+        "bbox_only",
+        {
+          "x": 0,
+          "y": 0,
+          "width": 512,
+          "height": 512
+        },
+        0,
+        0,
+        512,
+        512,
+        ""
+      ]
+    },
+    {
+      "id": 69,
+      "type": "Krea2LoRAStackRowModelLoader",
+      "pos": [
+        2950,
+        385
+      ],
+      "size": [
+        360,
+        180
+      ],
+      "flags": {},
+      "order": 52,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 212
+        },
+        {
+          "name": "lora_stack",
+          "type": "KREA2_MULTI_LORA_STACK",
+          "link": 213
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            218,
+            221
+          ]
+        },
+        {
+          "name": "alias",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "lora_name",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "effective_strength",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2LoRAStackRowModelLoader"
+      },
+      "widgets_values": [
+        1,
+        "stack_strength",
+        1.0
+      ]
+    },
+    {
+      "id": 70,
+      "type": "VAEEncode",
+      "pos": [
+        3450,
+        -200
+      ],
+      "size": [
+        250,
+        95
+      ],
+      "flags": {},
+      "order": 53,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pixels",
+          "type": "IMAGE",
+          "link": 214
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 215
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            216
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEEncode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 71,
+      "type": "SetLatentNoiseMask",
+      "pos": [
+        3450,
+        -70
+      ],
+      "size": [
+        270,
+        95
+      ],
+      "flags": {},
+      "order": 54,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 216
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 217
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            226
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SetLatentNoiseMask"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 72,
+      "type": "CFGGuider",
+      "pos": [
+        3450,
+        85
+      ],
+      "size": [
+        270,
+        127
+      ],
+      "flags": {},
+      "order": 55,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 218
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 219
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 220
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "links": [
+            223
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CFGGuider"
+      },
+      "widgets_values": [
+        1
+      ]
+    },
+    {
+      "id": 73,
+      "type": "BasicScheduler",
+      "pos": [
+        3760,
+        85
+      ],
+      "size": [
+        270,
+        143
+      ],
+      "flags": {},
+      "order": 56,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 221
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            225
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "simple",
+        8,
+        0.45
+      ]
+    },
+    {
+      "id": 74,
+      "type": "RandomNoise",
+      "pos": [
+        3760,
+        -200
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 57,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "NOISE",
+          "type": "NOISE",
+          "links": [
+            222
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RandomNoise"
+      },
+      "widgets_values": [
+        101867992357417,
+        "fixed"
+      ]
+    },
+    {
+      "id": 75,
+      "type": "SamplerCustomAdvanced",
+      "pos": [
+        4060,
+        -80
+      ],
+      "size": [
+        315,
+        260
+      ],
+      "flags": {},
+      "order": 58,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": 222
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 223
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 224
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 225
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 226
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "links": [
+            227
+          ]
+        },
+        {
+          "name": "denoised_output",
+          "type": "LATENT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SamplerCustomAdvanced"
+      },
+      "widgets_values": [],
+      "title": "Row 1 crop detail sampler"
+    },
+    {
+      "id": 76,
+      "type": "VAEDecode",
+      "pos": [
+        4410,
+        -70
+      ],
+      "size": [
+        225,
+        72
+      ],
+      "flags": {},
+      "order": 59,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 227
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 228
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            230
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 77,
+      "type": "Krea2RegionalLoRACropComposite",
+      "pos": [
+        4680,
+        -200
+      ],
+      "size": [
+        390,
+        250
+      ],
+      "flags": {},
+      "order": 60,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "base_image",
+          "type": "IMAGE",
+          "link": 229
+        },
+        {
+          "name": "edited_crop",
+          "type": "IMAGE",
+          "link": 230
+        },
+        {
+          "name": "crop_info",
+          "type": "KREA2_REGION_CROP",
+          "link": 231
+        },
+        {
+          "name": "blend_mask",
+          "type": "MASK",
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            232,
+            234,
+            256
+          ]
+        },
+        {
+          "name": "used_mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            233
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2RegionalLoRACropComposite"
+      },
+      "widgets_values": [
+        "crop_info",
+        4,
+        1.0
+      ]
+    },
+    {
+      "id": 78,
+      "type": "PreviewImage",
+      "pos": [
+        5120,
+        -200
+      ],
+      "size": [
+        360,
+        480
+      ],
+      "flags": {},
+      "order": 61,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 232
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": [],
+      "title": "After row 1 composite"
+    },
+    {
+      "id": 79,
+      "type": "PreviewAny",
+      "pos": [
+        4680,
+        90
+      ],
+      "size": [
+        390,
+        250
+      ],
+      "flags": {},
+      "order": 62,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 233
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "id": 80,
+      "type": "Krea2RegionalLoRACropExtract",
+      "pos": [
+        2950,
+        750
+      ],
+      "size": [
+        430,
+        520
+      ],
+      "flags": {},
+      "order": 71,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 234
+        },
+        {
+          "name": "lora_stack",
+          "type": "KREA2_MULTI_LORA_STACK",
+          "link": 235
+        },
+        {
+          "name": "kj_bboxes",
+          "type": "BBOX",
+          "link": null,
+          "shape": 7
+        },
+        {
+          "name": "canvas_width",
+          "type": "INT",
+          "link": 236,
+          "widget": {
+            "name": "canvas_width"
+          }
+        },
+        {
+          "name": "canvas_height",
+          "type": "INT",
+          "link": 237,
+          "widget": {
+            "name": "canvas_height"
+          }
+        },
+        {
+          "name": "bboxes",
+          "type": "BOUNDING_BOX",
+          "link": 238,
+          "shape": 7,
+          "widget": {
+            "name": "bboxes"
+          }
+        }
+      ],
+      "outputs": [
+        {
+          "name": "crop_image",
+          "type": "IMAGE",
+          "links": [
+            241
+          ]
+        },
+        {
+          "name": "crop_mask",
+          "type": "MASK",
+          "links": [
+            244
+          ]
+        },
+        {
+          "name": "crop_info",
+          "type": "KREA2_REGION_CROP",
+          "links": [
+            258
+          ]
+        },
+        {
+          "name": "alias",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "lora_name",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "lora_strength",
+          "type": "FLOAT",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2RegionalLoRACropExtract"
+      },
+      "widgets_values": [
+        2,
+        1024,
+        1024,
+        "xywh",
+        96,
+        0.15,
+        512,
+        16,
+        0.03,
+        16,
+        12,
+        "bbox_only",
+        {
+          "x": 0,
+          "y": 0,
+          "width": 512,
+          "height": 512
+        },
+        0,
+        0,
+        512,
+        512,
+        ""
+      ]
+    },
+    {
+      "id": 81,
+      "type": "Krea2LoRAStackRowModelLoader",
+      "pos": [
+        2950,
+        1335
+      ],
+      "size": [
+        360,
+        180
+      ],
+      "flags": {},
+      "order": 72,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 239
+        },
+        {
+          "name": "lora_stack",
+          "type": "KREA2_MULTI_LORA_STACK",
+          "link": 240
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "links": [
+            245,
+            248
+          ]
+        },
+        {
+          "name": "alias",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "lora_name",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "effective_strength",
+          "type": "FLOAT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2LoRAStackRowModelLoader"
+      },
+      "widgets_values": [
+        2,
+        "stack_strength",
+        1.0
+      ]
+    },
+    {
+      "id": 82,
+      "type": "VAEEncode",
+      "pos": [
+        3450,
+        750
+      ],
+      "size": [
+        250,
+        95
+      ],
+      "flags": {},
+      "order": 73,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "pixels",
+          "type": "IMAGE",
+          "link": 241
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 242
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            243
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEEncode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 83,
+      "type": "SetLatentNoiseMask",
+      "pos": [
+        3450,
+        880
+      ],
+      "size": [
+        270,
+        95
+      ],
+      "flags": {},
+      "order": 74,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 243
+        },
+        {
+          "name": "mask",
+          "type": "MASK",
+          "link": 244
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "links": [
+            253
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SetLatentNoiseMask"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 84,
+      "type": "CFGGuider",
+      "pos": [
+        3450,
+        1035
+      ],
+      "size": [
+        270,
+        127
+      ],
+      "flags": {},
+      "order": 75,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 245
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 246
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 247
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "links": [
+            250
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "CFGGuider"
+      },
+      "widgets_values": [
+        1
+      ]
+    },
+    {
+      "id": 85,
+      "type": "BasicScheduler",
+      "pos": [
+        3760,
+        1035
+      ],
+      "size": [
+        270,
+        143
+      ],
+      "flags": {},
+      "order": 76,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 248
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            252
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "simple",
+        8,
+        0.45
+      ]
+    },
+    {
+      "id": 86,
+      "type": "RandomNoise",
+      "pos": [
+        3760,
+        750
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 77,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "NOISE",
+          "type": "NOISE",
+          "links": [
+            249
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "RandomNoise"
+      },
+      "widgets_values": [
+        101867992357418,
+        "fixed"
+      ]
+    },
+    {
+      "id": 87,
+      "type": "SamplerCustomAdvanced",
+      "pos": [
+        4060,
+        870
+      ],
+      "size": [
+        315,
+        260
+      ],
+      "flags": {},
+      "order": 78,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": 249
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 250
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 251
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 252
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 253
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "links": [
+            254
+          ]
+        },
+        {
+          "name": "denoised_output",
+          "type": "LATENT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SamplerCustomAdvanced"
+      },
+      "widgets_values": [],
+      "title": "Row 2 crop detail sampler"
+    },
+    {
+      "id": 88,
+      "type": "VAEDecode",
+      "pos": [
+        4410,
+        880
+      ],
+      "size": [
+        225,
+        72
+      ],
+      "flags": {},
+      "order": 79,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 254
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 255
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            257
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "VAEDecode"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 89,
+      "type": "Krea2RegionalLoRACropComposite",
+      "pos": [
+        4680,
+        750
+      ],
+      "size": [
+        390,
+        250
+      ],
+      "flags": {},
+      "order": 80,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "base_image",
+          "type": "IMAGE",
+          "link": 256
+        },
+        {
+          "name": "edited_crop",
+          "type": "IMAGE",
+          "link": 257
+        },
+        {
+          "name": "crop_info",
+          "type": "KREA2_REGION_CROP",
+          "link": 258
+        },
+        {
+          "name": "blend_mask",
+          "type": "MASK",
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            259
+          ]
+        },
+        {
+          "name": "used_mask",
+          "type": "MASK",
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            260
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "Krea2RegionalLoRACropComposite"
+      },
+      "widgets_values": [
+        "crop_info",
+        4,
+        1.0
+      ]
+    },
+    {
+      "id": 90,
+      "type": "PreviewImage",
+      "pos": [
+        5120,
+        750
+      ],
+      "size": [
+        360,
+        480
+      ],
+      "flags": {},
+      "order": 81,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 259
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      },
+      "widgets_values": [],
+      "title": "Final composited image"
+    },
+    {
+      "id": 91,
+      "type": "PreviewAny",
+      "pos": [
+        4680,
+        1040
+      ],
+      "size": [
+        390,
+        250
+      ],
+      "flags": {},
+      "order": 82,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source",
+          "type": "*",
+          "link": 260
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [
+        null,
+        null,
+        null
+      ]
+    }
+  ],
+  "links": [
+    [
+      2,
+      5,
+      1,
+      6,
+      0,
+      "IMAGE"
+    ],
+    [
+      3,
+      9,
+      0,
+      11,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      4,
+      16,
+      0,
+      14,
+      0,
+      "LATENT"
+    ],
+    [
+      5,
+      10,
+      0,
+      16,
+      0,
+      "NOISE"
+    ],
+    [
+      6,
+      11,
+      0,
+      16,
+      1,
+      "GUIDER"
+    ],
+    [
+      7,
+      12,
+      0,
+      16,
+      2,
+      "SAMPLER"
+    ],
+    [
+      8,
+      13,
+      0,
+      16,
+      3,
+      "SIGMAS"
+    ],
+    [
+      9,
+      15,
+      0,
+      16,
+      4,
+      "LATENT"
+    ],
+    [
+      10,
+      14,
+      0,
+      17,
+      0,
+      "IMAGE"
+    ],
+    [
+      11,
+      2,
+      0,
+      8,
+      0,
+      "CLIP"
+    ],
+    [
+      12,
+      2,
+      0,
+      9,
+      0,
+      "CLIP"
+    ],
+    [
+      13,
+      3,
+      0,
+      14,
+      1,
+      "VAE"
+    ],
+    [
+      16,
+      5,
+      0,
+      8,
+      1,
+      "STRING"
+    ],
+    [
+      22,
+      1,
+      0,
+      18,
+      0,
+      "MODEL"
+    ],
+    [
+      46,
+      28,
+      0,
+      29,
+      0,
+      "MODEL"
+    ],
+    [
+      47,
+      29,
+      0,
+      30,
+      0,
+      "MODEL"
+    ],
+    [
+      48,
+      30,
+      0,
+      31,
+      0,
+      "MODEL"
+    ],
+    [
+      49,
+      31,
+      0,
+      32,
+      0,
+      "MODEL"
+    ],
+    [
+      50,
+      32,
+      0,
+      33,
+      0,
+      "MODEL"
+    ],
+    [
+      52,
+      8,
+      0,
+      27,
+      0,
+      "CONDITIONING"
+    ],
+    [
+      53,
+      27,
+      0,
+      11,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      86,
+      18,
+      0,
+      28,
+      0,
+      "MODEL"
+    ],
+    [
+      194,
+      65,
+      1,
+      38,
+      0,
+      "STRING"
+    ],
+    [
+      195,
+      33,
+      0,
+      66,
+      0,
+      "MODEL"
+    ],
+    [
+      196,
+      65,
+      0,
+      66,
+      1,
+      "KREA2_MULTI_LORA_STACK"
+    ],
+    [
+      197,
+      5,
+      3,
+      66,
+      3,
+      "INT"
+    ],
+    [
+      198,
+      5,
+      4,
+      66,
+      4,
+      "INT"
+    ],
+    [
+      199,
+      5,
+      2,
+      66,
+      5,
+      "BOUNDING_BOX"
+    ],
+    [
+      200,
+      33,
+      0,
+      11,
+      0,
+      "MODEL"
+    ],
+    [
+      201,
+      33,
+      0,
+      13,
+      0,
+      "MODEL"
+    ],
+    [
+      202,
+      66,
+      1,
+      39,
+      0,
+      "STRING"
+    ],
+    [
+      203,
+      65,
+      0,
+      67,
+      0,
+      "KREA2_MULTI_LORA_STACK"
+    ],
+    [
+      204,
+      5,
+      2,
+      67,
+      2,
+      "BOUNDING_BOX"
+    ],
+    [
+      205,
+      67,
+      0,
+      37,
+      0,
+      "IMAGE"
+    ],
+    [
+      206,
+      67,
+      1,
+      19,
+      0,
+      "STRING"
+    ],
+    [
+      207,
+      14,
+      0,
+      68,
+      0,
+      "IMAGE"
+    ],
+    [
+      208,
+      65,
+      0,
+      68,
+      1,
+      "KREA2_MULTI_LORA_STACK"
+    ],
+    [
+      209,
+      5,
+      3,
+      68,
+      3,
+      "INT"
+    ],
+    [
+      210,
+      5,
+      4,
+      68,
+      4,
+      "INT"
+    ],
+    [
+      211,
+      5,
+      2,
+      68,
+      5,
+      "BOUNDING_BOX"
+    ],
+    [
+      212,
+      33,
+      0,
+      69,
+      0,
+      "MODEL"
+    ],
+    [
+      213,
+      65,
+      0,
+      69,
+      1,
+      "KREA2_MULTI_LORA_STACK"
+    ],
+    [
+      214,
+      68,
+      0,
+      70,
+      0,
+      "IMAGE"
+    ],
+    [
+      215,
+      3,
+      0,
+      70,
+      1,
+      "VAE"
+    ],
+    [
+      216,
+      70,
+      0,
+      71,
+      0,
+      "LATENT"
+    ],
+    [
+      217,
+      68,
+      1,
+      71,
+      1,
+      "MASK"
+    ],
+    [
+      218,
+      69,
+      0,
+      72,
+      0,
+      "MODEL"
+    ],
+    [
+      219,
+      27,
+      0,
+      72,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      220,
+      9,
+      0,
+      72,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      221,
+      69,
+      0,
+      73,
+      0,
+      "MODEL"
+    ],
+    [
+      222,
+      74,
+      0,
+      75,
+      0,
+      "NOISE"
+    ],
+    [
+      223,
+      72,
+      0,
+      75,
+      1,
+      "GUIDER"
+    ],
+    [
+      224,
+      12,
+      0,
+      75,
+      2,
+      "SAMPLER"
+    ],
+    [
+      225,
+      73,
+      0,
+      75,
+      3,
+      "SIGMAS"
+    ],
+    [
+      226,
+      71,
+      0,
+      75,
+      4,
+      "LATENT"
+    ],
+    [
+      227,
+      75,
+      0,
+      76,
+      0,
+      "LATENT"
+    ],
+    [
+      228,
+      3,
+      0,
+      76,
+      1,
+      "VAE"
+    ],
+    [
+      229,
+      14,
+      0,
+      77,
+      0,
+      "IMAGE"
+    ],
+    [
+      230,
+      76,
+      0,
+      77,
+      1,
+      "IMAGE"
+    ],
+    [
+      231,
+      68,
+      2,
+      77,
+      2,
+      "KREA2_REGION_CROP"
+    ],
+    [
+      232,
+      77,
+      0,
+      78,
+      0,
+      "IMAGE"
+    ],
+    [
+      233,
+      77,
+      2,
+      79,
+      0,
+      "STRING"
+    ],
+    [
+      234,
+      77,
+      0,
+      80,
+      0,
+      "IMAGE"
+    ],
+    [
+      235,
+      65,
+      0,
+      80,
+      1,
+      "KREA2_MULTI_LORA_STACK"
+    ],
+    [
+      236,
+      5,
+      3,
+      80,
+      3,
+      "INT"
+    ],
+    [
+      237,
+      5,
+      4,
+      80,
+      4,
+      "INT"
+    ],
+    [
+      238,
+      5,
+      2,
+      80,
+      5,
+      "BOUNDING_BOX"
+    ],
+    [
+      239,
+      33,
+      0,
+      81,
+      0,
+      "MODEL"
+    ],
+    [
+      240,
+      65,
+      0,
+      81,
+      1,
+      "KREA2_MULTI_LORA_STACK"
+    ],
+    [
+      241,
+      80,
+      0,
+      82,
+      0,
+      "IMAGE"
+    ],
+    [
+      242,
+      3,
+      0,
+      82,
+      1,
+      "VAE"
+    ],
+    [
+      243,
+      82,
+      0,
+      83,
+      0,
+      "LATENT"
+    ],
+    [
+      244,
+      80,
+      1,
+      83,
+      1,
+      "MASK"
+    ],
+    [
+      245,
+      81,
+      0,
+      84,
+      0,
+      "MODEL"
+    ],
+    [
+      246,
+      27,
+      0,
+      84,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      247,
+      9,
+      0,
+      84,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      248,
+      81,
+      0,
+      85,
+      0,
+      "MODEL"
+    ],
+    [
+      249,
+      86,
+      0,
+      87,
+      0,
+      "NOISE"
+    ],
+    [
+      250,
+      84,
+      0,
+      87,
+      1,
+      "GUIDER"
+    ],
+    [
+      251,
+      12,
+      0,
+      87,
+      2,
+      "SAMPLER"
+    ],
+    [
+      252,
+      85,
+      0,
+      87,
+      3,
+      "SIGMAS"
+    ],
+    [
+      253,
+      83,
+      0,
+      87,
+      4,
+      "LATENT"
+    ],
+    [
+      254,
+      87,
+      0,
+      88,
+      0,
+      "LATENT"
+    ],
+    [
+      255,
+      3,
+      0,
+      88,
+      1,
+      "VAE"
+    ],
+    [
+      256,
+      77,
+      0,
+      89,
+      0,
+      "IMAGE"
+    ],
+    [
+      257,
+      88,
+      0,
+      89,
+      1,
+      "IMAGE"
+    ],
+    [
+      258,
+      80,
+      2,
+      89,
+      2,
+      "KREA2_REGION_CROP"
+    ],
+    [
+      259,
+      89,
+      0,
+      90,
+      0,
+      "IMAGE"
+    ],
+    [
+      260,
+      89,
+      2,
+      91,
+      0,
+      "STRING"
+    ]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.45,
+      "offset": [
+        164.0,
+        1280.0
+      ]
+    },
+    "frontendVersion": "1.47.6",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}

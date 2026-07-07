@@ -69,3 +69,29 @@ def test_crop_extract_and_composite_roundtrip():
     assert float(out.max()) == 1.0
     assert float(out[:, :2].max()) == 0.0
     assert float(used_mask.max()) == 1.0
+
+
+def test_bbox_attention_bias_routes_subject_tokens():
+    masks = {
+        "a": mod.torch.tensor([1.0, 0.0, 0.0]),
+        "b": mod.torch.tensor([0.0, 1.0, 0.0]),
+    }
+    positions = {"a": [[0]], "b": [[1]]}
+    bias = mod._construct_bbox_attention_bias(
+        masks,
+        positions,
+        txt_seq_len=4,
+        img_seq_len=3,
+        bias_scale=5.0,
+        positive_bias_scale=1.0,
+        bidirectional=True,
+        use_positive_bias=True,
+        device=mod.torch.device("cpu"),
+        dtype=mod.torch.float32,
+    )
+    assert bias is not None
+    assert tuple(bias.shape) == (1, 7, 7)
+    assert float(bias[0, 4, 0]) > 0.0
+    assert float(bias[0, 4, 1]) < 0.0
+    assert float(bias[0, 0, 4]) > 0.0
+    assert float(bias[0, 0, 5]) < 0.0

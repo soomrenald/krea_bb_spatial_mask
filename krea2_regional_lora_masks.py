@@ -68,7 +68,7 @@ WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
 CROP_INFO_TYPE = "KREA2_REGION_CROP"
-NODE_VERSION = "2026-07-06.14-crop-composite-controls"
+NODE_VERSION = "2026-07-06.15-bbox-freefuse-krea2"
 TEXT_TOKEN_STRENGTH = 0.0
 KREA_OUTPUT_IMAGE_INDICATOR = 2
 OUTPUT_DELTA_BLEND_MODE = True
@@ -1080,6 +1080,246 @@ class DiagnosticRegionalApplierState(RegionalApplierState):
         return out if torch.is_tensor(out) else None
 
 
+class BBoxFreeFuseApplierState(RegionalApplierState):
+    """FreeFuse-inspired Krea2 pass: bbox masks for LoRA deltas plus bbox-derived attention bias."""
+
+    def __init__(
+        self,
+        *args,
+        token_pos_maps: Dict[str, List[List[int]]],
+        bias_scale: float,
+        positive_bias_scale: float,
+        bidirectional: bool,
+        use_positive_bias: bool,
+        bias_blocks: str,
+        text_token_lora_strength: float,
+        enable_lora_masking: bool,
+        enable_attention_bias: bool,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.token_pos_maps = token_pos_maps
+        self.bias_scale = float(bias_scale)
+        self.positive_bias_scale = float(positive_bias_scale)
+        self.bidirectional = bool(bidirectional)
+        self.use_positive_bias = bool(use_positive_bias)
+        self.bias_blocks = str(bias_blocks)
+        self.text_token_lora_strength = float(text_token_lora_strength)
+        self.enable_lora_masking = bool(enable_lora_masking)
+        self.enable_attention_bias = bool(enable_attention_bias)
+        self._cap_len: Optional[int] = None
+        self._bias_cache: Dict[Tuple[int, int, str, str], Optional[torch.Tensor]] = {}
+
+    def wrapper(self, executor, *args, **kwargs):
+        model_obj = getattr(executor, "class_obj", None)
+        handles = []
+        transformer_options = _find_transformer_options(args, kwargs)
+        layout = self._infer_layout(args, kwargs)
+        self._apply_runtime_latent_grid(layout, args, model_obj)
+        self.session = RuntimeSession(layout=layout, transformer_options=transformer_options, wrapper_calls=1)
+        self._cap_len = None
+        self._bias_cache = {}
+        try:
+            if model_obj is None:
+                return executor(*args, **kwargs)
+            name_to_module = dict(model_obj.named_modules())
+            if self.enable_lora_masking:
+                for layer_name, entries in self.layer_entries.items():
+                    regional_entries = [entry for entry in entries if entry.mask_scope == "regional"]
+                    if not regional_entries:
+                        continue
+                    module = name_to_module.get(layer_name)
+                    if module is None:
+                        continue
+                    handles.append(module.register_forward_hook(self._make_bbox_freefuse_hook(regional_entries)))
+            txtfusion = getattr(model_obj, "txtfusion", None)
+            if txtfusion is not None:
+                handles.append(txtfusion.register_forward_hook(self._txtfusion_hook))
+            if self.enable_attention_bias and self.bias_blocks != "none":
+                for block in self._resolve_bias_blocks(model_obj):
+                    attn = getattr(block, "attn", None)
+                    if attn is not None:
+                        handles.append(attn.register_forward_pre_hook(self._make_attention_bias_prehook(), with_kwargs=True))
+            if self.debug:
+                LOGGER.info(
+                    "[Krea2RegionalMultiLoRA] bbox-freefuse installed hooks=%d lora_masking=%s attention_bias=%s bias_blocks=%s token_pos=%s",
+                    len(handles),
+                    self.enable_lora_masking,
+                    self.enable_attention_bias,
+                    self.bias_blocks,
+                    {k: v for k, v in self.token_pos_maps.items()},
+                )
+            result = executor(*args, **kwargs)
+            if self.debug and self.session is not None:
+                LOGGER.info(
+                    "[Krea2RegionalMultiLoRA] bbox-freefuse stats hook_calls=%d applied=%d skipped=%d cap_len=%s observed_seq_lens=%s mask_debug=%s",
+                    self.session.hook_calls,
+                    self.session.applied_calls,
+                    self.session.skipped_no_mask,
+                    self._cap_len,
+                    dict(sorted(self.session.observed_seq_lens.items())),
+                    _format_sample(self.session.mask_debug.values(), 6),
+                )
+            return result
+        finally:
+            for h in handles:
+                try:
+                    h.remove()
+                except Exception:
+                    pass
+            self.session = None
+            self._cap_len = None
+            self._bias_cache = {}
+
+    def _txtfusion_hook(self, module, inputs, output):
+        if torch.is_tensor(output) and output.ndim >= 2:
+            self._cap_len = int(output.shape[1])
+
+    def _resolve_bias_blocks(self, model_obj: Any) -> List[Any]:
+        blocks = getattr(model_obj, "blocks", None)
+        if blocks is None:
+            return []
+        n = len(blocks)
+        if self.bias_blocks == "all":
+            indices = list(range(n))
+        elif self.bias_blocks == "last_half":
+            indices = list(range(n // 2, n))
+        else:
+            indices = []
+        return [blocks[i] for i in indices if 0 <= i < n]
+
+    def _bbox_mask_for_selection(self, selection_index: int, img_len: int, device: torch.device, dtype: torch.dtype) -> Optional[torch.Tensor]:
+        session = self.session
+        assert session is not None
+        if img_len <= 0:
+            return None
+        key = (selection_index, img_len, str(device), str(dtype))
+        cached = session.mask_cache.get(key)
+        if cached is not None:
+            return cached.view(-1)
+        rows, cols = _infer_grid(img_len, self.image_rows, self.image_cols, self.canvas_aspect)
+        if not rows or not cols or int(rows * cols) != int(img_len):
+            rows, cols = 1, int(img_len)
+        selection = self.stack.selections[selection_index]
+        box_indices = [i for i in selection.boxes if 0 <= i < len(self.boxes)]
+        if not box_indices:
+            return None
+        token_mask = torch.zeros((rows * cols,), dtype=torch.float32)
+        for box_index in box_indices:
+            token_mask = torch.maximum(token_mask, _rect_token_mask(rows, cols, self.boxes[box_index], self.seam_feather))
+        token_mask = token_mask.to(device=device, dtype=dtype).view(-1)
+        session.mask_cache[key] = token_mask
+        self._record_mask_debug(selection_index, img_len, "bbox_freefuse", 0, img_len, rows, cols, token_mask)
+        return token_mask
+
+    def _sequence_mask_for_selection(self, selection_index: int, seq_len: int, device: torch.device, dtype: torch.dtype) -> Optional[torch.Tensor]:
+        cap_len = self._cap_len
+        if cap_len is None:
+            cap_len = self.session.layout.txtlen if self.session is not None else None
+        if cap_len is None or cap_len < 0 or cap_len >= seq_len:
+            return None
+        img_len = seq_len - int(cap_len)
+        image_mask = self._bbox_mask_for_selection(selection_index, img_len, device, dtype)
+        if image_mask is None:
+            return None
+        full = torch.full((seq_len,), float(self.text_token_lora_strength), device=device, dtype=dtype)
+        full[int(cap_len):int(cap_len) + img_len] = image_mask
+        return full.view(1, seq_len, 1)
+
+    def _all_bbox_masks(self, img_len: int, device: torch.device, dtype: torch.dtype) -> Dict[str, torch.Tensor]:
+        masks: Dict[str, torch.Tensor] = {}
+        for idx, selection in enumerate(self.stack.selections):
+            if not selection.enabled:
+                continue
+            mask = self._bbox_mask_for_selection(idx, img_len, device, dtype)
+            if mask is not None:
+                masks[selection.alias] = mask
+        return masks
+
+    def _make_attention_bias_prehook(self):
+        def _prehook(module, args, kwargs):
+            if not args:
+                return None
+            x = args[0]
+            if not torch.is_tensor(x) or x.ndim < 3:
+                return None
+            cap_len = self._cap_len
+            if cap_len is None or cap_len <= 0:
+                return None
+            seq_len = int(x.shape[1])
+            img_len = seq_len - int(cap_len)
+            if img_len <= 0:
+                return None
+            key = (int(img_len), int(cap_len), str(x.device), str(x.dtype))
+            bias = self._bias_cache.get(key)
+            if key not in self._bias_cache:
+                masks = self._all_bbox_masks(img_len, x.device, x.dtype)
+                bias = _construct_bbox_attention_bias(
+                    masks,
+                    self.token_pos_maps,
+                    int(cap_len),
+                    int(img_len),
+                    self.bias_scale,
+                    self.positive_bias_scale,
+                    self.bidirectional,
+                    self.use_positive_bias,
+                    x.device,
+                    x.dtype,
+                )
+                self._bias_cache[key] = bias.detach() if torch.is_tensor(bias) else None
+            if bias is None:
+                return None
+            bias = bias.to(device=x.device, dtype=x.dtype)
+            if bias.dim() == 3:
+                bias = bias.unsqueeze(1)
+            new_args = list(args)
+            new_kwargs = dict(kwargs) if kwargs else {}
+            if len(new_args) >= 3:
+                existing = new_args[2]
+                new_args[2] = existing + bias if torch.is_tensor(existing) else bias
+            else:
+                existing = new_kwargs.get("mask")
+                new_kwargs["mask"] = existing + bias if torch.is_tensor(existing) else bias
+            return tuple(new_args), new_kwargs
+        return _prehook
+
+    def _make_bbox_freefuse_hook(self, entries: List[LayerPatch]):
+        def hook(module, inputs, output):
+            session = self.session
+            if session is None or not torch.is_tensor(output) or not inputs:
+                return output
+            session.hook_calls += 1
+            x = inputs[0]
+            if not torch.is_tensor(x) or x.ndim < 2 or output.ndim < 2 or x.shape[:-1] != output.shape[:-1]:
+                return output
+            seq_len = int(x.shape[-2])
+            session.observed_seq_lens[seq_len] = session.observed_seq_lens.get(seq_len, 0) + 1
+            out = output
+            compute_dtype = _compute_dtype_for(x)
+            for entry in entries:
+                selection = self.stack.selections[entry.selection_index]
+                if not selection.enabled:
+                    continue
+                mask = self._sequence_mask_for_selection(entry.selection_index, seq_len, x.device, compute_dtype)
+                if mask is None:
+                    session.skipped_no_mask += 1
+                    continue
+                if self.outside_strength != 0.0:
+                    image_start = self._cap_len if self._cap_len is not None else 0
+                    mask[:, int(image_start):, :] = mask[:, int(image_start):, :] + (1.0 - mask[:, int(image_start):, :]) * self.outside_strength
+                if self.debug:
+                    self._log_runtime_mask(entry, seq_len, mask)
+                mask = _reshape_token_mask(mask, x.ndim)
+                down, up = self._matrices_on_device(entry, x.device, compute_dtype)
+                xin = x.to(dtype=compute_dtype) if x.dtype != compute_dtype else x
+                delta = F.linear(F.linear(xin, down), up)
+                delta = delta * (entry.matrices.scale * entry.strength * self.base_strength)
+                out = out + (delta * mask).to(dtype=out.dtype)
+                session.applied_calls += 1
+            return out
+        return hook
+
+
 # -------------------- generic helpers --------------------
 
 
@@ -1123,6 +1363,213 @@ def _json_loads_maybe(value: Any, default: Any) -> Any:
             LOGGER.warning("Invalid JSON: %s", s[:256])
             return default
     return default
+
+
+KREA2_TEMPLATE = (
+    "<|im_start|>system\nDescribe the image by detailing the color, shape, size, "
+    "texture, quantity, text, spatial relationships of the objects and background:"
+    "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+)
+KREA2_IM_START_ID = 151644
+KREA2_USER_TOKEN_ID = 872
+KREA2_NEWLINE_TOKEN_ID = 198
+
+
+def _collect_token_ids_recursive(payload: Any, flat_ids: List[int]) -> None:
+    if payload is None:
+        return
+    if isinstance(payload, dict):
+        for value in payload.values():
+            _collect_token_ids_recursive(value, flat_ids)
+        return
+    if isinstance(payload, (int, float)):
+        flat_ids.append(int(payload))
+        return
+    if isinstance(payload, (tuple, list)):
+        is_token_tuple = (
+            payload
+            and isinstance(payload[0], (int, float))
+            and len(payload) <= 3
+            and (len(payload) == 1 or isinstance(payload[1], (int, float)))
+        )
+        if is_token_tuple:
+            flat_ids.append(int(payload[0]))
+            return
+        for item in payload:
+            _collect_token_ids_recursive(item, flat_ids)
+
+
+def _flatten_token_ids(token_weight_pairs: Any) -> List[int]:
+    chunks = token_weight_pairs
+    if isinstance(token_weight_pairs, dict):
+        chunks = None
+        for key in ("qwen3vl_4b", "qwen3_8b", "qwen3_4b", "qwen3", "l", "clip_l", "g", "t5xxl"):
+            if key in token_weight_pairs:
+                chunks = token_weight_pairs[key]
+                break
+        if chunks is None:
+            chunks = next(iter(token_weight_pairs.values()), [])
+    flat_ids: List[int] = []
+    _collect_token_ids_recursive(chunks, flat_ids)
+    return flat_ids
+
+
+def _extract_nested_tokenizer(tokenizer_obj: Any) -> Any:
+    if tokenizer_obj is None:
+        return None
+    return getattr(tokenizer_obj, "tokenizer", tokenizer_obj)
+
+
+def _resolve_krea2_tokenizer(clip: Any) -> Any:
+    tokenizer = getattr(clip, "tokenizer", None)
+    if tokenizer is None:
+        raise RuntimeError("Could not find clip.tokenizer for Krea2 token position lookup.")
+    for key in ("qwen3vl_4b", "qwen3_8b", "qwen3_4b", "qwen3"):
+        if hasattr(tokenizer, key):
+            resolved = _extract_nested_tokenizer(getattr(tokenizer, key))
+            if resolved is not None:
+                return resolved
+    clip_name = str(getattr(tokenizer, "clip_name", "")).lower()
+    clip_key = getattr(tokenizer, "clip", None)
+    if ("qwen3" in clip_name or "qwen3vl" in clip_name) and hasattr(tokenizer, clip_name):
+        return _extract_nested_tokenizer(getattr(tokenizer, clip_name))
+    if isinstance(clip_key, str) and "qwen3" in clip_key.lower() and hasattr(tokenizer, clip_key):
+        return _extract_nested_tokenizer(getattr(tokenizer, clip_key))
+    available = sorted(vars(tokenizer).keys()) if hasattr(tokenizer, "__dict__") else []
+    raise RuntimeError(
+        "Could not resolve Krea2 Qwen tokenizer from CLIP object "
+        f"(tokenizer_class={tokenizer.__class__.__name__}, attrs={available})."
+    )
+
+
+def _find_krea2_template_end(token_ids: List[int]) -> int:
+    template_end = -1
+    count_im_start = 0
+    for i, tid in enumerate(token_ids):
+        if int(tid) == KREA2_IM_START_ID and count_im_start < 2:
+            template_end = i
+            count_im_start += 1
+    if template_end == -1:
+        return 0
+    if len(token_ids) > template_end + 3 and int(token_ids[template_end + 1]) == KREA2_USER_TOKEN_ID:
+        if int(token_ids[template_end + 2]) == KREA2_NEWLINE_TOKEN_ID:
+            template_end += 3
+    return template_end
+
+
+def _concept_texts_for_stack(stack: LoraStack, concepts_json: Any) -> Dict[str, str]:
+    raw = _json_loads_maybe(concepts_json, {})
+    mapping: Dict[str, str] = {}
+    if isinstance(raw, dict):
+        mapping = {str(k).strip(): str(v).strip() for k, v in raw.items() if str(k).strip() and str(v).strip()}
+    elif isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            alias = str(item.get("alias", item.get("adapter_name", item.get("name", "")))).strip()
+            text = str(item.get("concept_text", item.get("text", ""))).strip()
+            if alias and text:
+                mapping[alias] = text
+    for selection in stack.selections:
+        alias = selection.alias.strip()
+        if alias and alias not in mapping:
+            mapping[alias] = alias
+    return mapping
+
+
+def _find_krea2_concept_positions(clip: Any, prompt: str, concepts: Dict[str, str]) -> Dict[str, List[List[int]]]:
+    if not prompt or not prompt.strip():
+        raise RuntimeError("Krea2 bbox FreeFuse mode requires the exact positive prompt string.")
+    tokenizer = _resolve_krea2_tokenizer(clip)
+    wrapped_text = KREA2_TEMPLATE.format(prompt)
+    token_weight_pairs = clip.tokenize(wrapped_text)
+    token_ids = _flatten_token_ids(token_weight_pairs)
+    if not token_ids:
+        raise RuntimeError("clip.tokenize returned no token ids for Krea2 prompt.")
+    template_end = _find_krea2_template_end(token_ids)
+    stripped_ids = token_ids[template_end:]
+    token_texts = [tokenizer.decode([tid]) for tid in stripped_ids]
+    concat_text = ""
+    token_spans: List[Tuple[int, int]] = []
+    for token_text in token_texts:
+        start = len(concat_text)
+        concat_text += token_text
+        token_spans.append((start, len(concat_text)))
+
+    out: Dict[str, List[List[int]]] = {}
+    lower_concat = concat_text.lower()
+    for alias, concept_text in concepts.items():
+        text = str(concept_text).strip()
+        if not text:
+            out[alias] = [[]]
+            continue
+        positions: List[int] = []
+        for needle, haystack in ((text, concat_text), (text.lower(), lower_concat)):
+            search_start = 0
+            while True:
+                idx = haystack.find(needle, search_start)
+                if idx == -1:
+                    break
+                c_start, c_end = idx, idx + len(needle)
+                for tok_i, (tok_start, tok_end) in enumerate(token_spans):
+                    if tok_end > c_start and tok_start < c_end and tok_i not in positions:
+                        positions.append(tok_i)
+                search_start = idx + 1
+            if positions:
+                break
+        positions.sort()
+        out[alias] = [positions]
+    return out
+
+
+def _construct_bbox_attention_bias(
+    lora_masks: Dict[str, torch.Tensor],
+    token_pos_maps: Dict[str, List[List[int]]],
+    txt_seq_len: int,
+    img_seq_len: int,
+    bias_scale: float,
+    positive_bias_scale: float,
+    bidirectional: bool,
+    use_positive_bias: bool,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Optional[torch.Tensor]:
+    if not lora_masks or txt_seq_len <= 0 or img_seq_len <= 0:
+        return None
+    names = [name for name in lora_masks.keys() if not name.startswith("_")]
+    if not names:
+        return None
+    total_seq_len = txt_seq_len + img_seq_len
+    bias = torch.zeros((1, total_seq_len, total_seq_len), device=device, dtype=dtype)
+    text_token_to_lora = torch.full((txt_seq_len,), -1, device=device, dtype=torch.long)
+    name_to_index = {name: idx for idx, name in enumerate(names)}
+    for name, positions_list in token_pos_maps.items():
+        if name not in name_to_index:
+            continue
+        positions = positions_list[0] if positions_list else []
+        for pos in positions:
+            if 0 <= int(pos) < txt_seq_len:
+                text_token_to_lora[int(pos)] = name_to_index[name]
+    if not bool((text_token_to_lora >= 0).any().detach().cpu()):
+        return None
+
+    for name in names:
+        lora_idx = name_to_index[name]
+        mask = lora_masks[name].to(device=device, dtype=dtype).reshape(1, -1)
+        if int(mask.shape[1]) != img_seq_len:
+            mask = F.interpolate(mask.view(1, 1, -1), size=img_seq_len, mode="linear", align_corners=False).view(1, -1)
+        mask = mask.clamp(0.0, 1.0)
+        other_text = ((text_token_to_lora != lora_idx) & (text_token_to_lora != -1)).to(dtype=dtype)
+        this_text = (text_token_to_lora == lora_idx).to(dtype=dtype)
+        bias[:, txt_seq_len:, :txt_seq_len] += mask.unsqueeze(-1) * other_text.view(1, 1, txt_seq_len) * (-float(bias_scale))
+        if use_positive_bias and positive_bias_scale != 0.0:
+            bias[:, txt_seq_len:, :txt_seq_len] += mask.unsqueeze(-1) * this_text.view(1, 1, txt_seq_len) * float(positive_bias_scale)
+        if bidirectional:
+            not_mask = 1.0 - mask
+            bias[:, :txt_seq_len, txt_seq_len:] += this_text.view(1, txt_seq_len, 1) * not_mask.unsqueeze(1) * (-float(bias_scale))
+            if use_positive_bias and positive_bias_scale != 0.0:
+                bias[:, :txt_seq_len, txt_seq_len:] += this_text.view(1, txt_seq_len, 1) * mask.unsqueeze(1) * float(positive_bias_scale)
+    return bias
 
 
 def _as_bool(v: Any, default: bool = True) -> bool:
@@ -1830,6 +2277,21 @@ def _format_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, 
     return "\n".join(lines)
 
 
+def _format_basic_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, float, float]], include_box_coords: bool = True) -> str:
+    skip_prefixes = (
+        "Mask semantics:",
+        "Mask scope:",
+        "Execution mode:",
+        "Mask layout:",
+        "Runtime debug:",
+    )
+    return "\n".join(
+        line
+        for line in _format_assignment_report(stack, boxes, include_box_coords).splitlines()
+        if not line.startswith(skip_prefixes)
+    )
+
+
 def _hex_to_rgb01(hex_color: str) -> Tuple[float, float, float]:
     h = hex_color.lstrip("#")
     return tuple(int(h[i:i+2], 16) / 255.0 for i in (0, 2, 4))
@@ -2419,6 +2881,147 @@ class Krea2RegionMasksFromBBoxes:
         return (batch, union, preview, report)
 
 
+class Krea2RegionalLoRAApplyBBoxFreeFuse:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "positive_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "lora_stack": (LORA_STACK_TYPE,),
+                "canvas_width": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "canvas_height": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "bbox_list_format": (["xywh", "xyxy", "auto"], {"default": "xywh"}),
+                "seam_feather": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 1.0, "step": 0.005}),
+                "outside_strength": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.01}),
+                "base_strength": ("FLOAT", {"default": 1.0, "min": -5.0, "max": 5.0, "step": 0.01}),
+                "text_token_lora_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "bias_scale": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 30.0, "step": 0.25}),
+                "positive_bias_scale": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.1}),
+                "bidirectional": ("BOOLEAN", {"default": True}),
+                "use_positive_bias": ("BOOLEAN", {"default": True}),
+                "bias_blocks": (["last_half", "all", "none"], {"default": "last_half"}),
+                "enable_lora_masking": ("BOOLEAN", {"default": True}),
+                "enable_attention_bias": ("BOOLEAN", {"default": True}),
+                "apply_to": (["krea_blocks_only", "all_matched_linears"], {"default": "krea_blocks_only"}),
+                "debug_logging": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "bboxes": ("BOUNDING_BOX",),
+                "kj_bboxes": ("BBOX",),
+                "concepts_json": ("STRING", {"multiline": True, "default": ""}),
+                "ideogram_prompt_json": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("model", "report")
+    FUNCTION = "apply"
+    CATEGORY = "Krea2/Regional LoRA"
+
+    def apply(
+        self,
+        model,
+        clip,
+        positive_prompt,
+        lora_stack,
+        canvas_width,
+        canvas_height,
+        bbox_list_format,
+        seam_feather,
+        outside_strength,
+        base_strength,
+        text_token_lora_strength,
+        bias_scale,
+        positive_bias_scale,
+        bidirectional,
+        use_positive_bias,
+        bias_blocks,
+        enable_lora_masking,
+        enable_attention_bias,
+        apply_to,
+        debug_logging,
+        bboxes=None,
+        kj_bboxes=None,
+        concepts_json="",
+        ideogram_prompt_json="",
+    ):
+        if patcher_extension is None:
+            raise RuntimeError("This node requires a recent ComfyUI build with comfy.patcher_extension")
+        stack = _as_stack(lora_stack)
+        boxes = _collect_boxes(bboxes, kj_bboxes, ideogram_prompt_json, canvas_width, canvas_height, bbox_list_format)
+        if not stack.selections:
+            return (model, "No LoRAs selected.")
+        if not boxes:
+            return (model, _format_basic_assignment_report(stack, []) + "\nNo external boxes were provided.")
+
+        concepts = _concept_texts_for_stack(stack, concepts_json)
+        token_pos_maps = _find_krea2_concept_positions(clip, positive_prompt, concepts)
+        missing = [
+            f"{selection.alias}='{concepts.get(selection.alias, selection.alias)}'"
+            for selection in stack.selections
+            if selection.enabled and not (token_pos_maps.get(selection.alias) and token_pos_maps[selection.alias][0])
+        ]
+        if missing:
+            raise RuntimeError(
+                "Krea2 bbox FreeFuse requires every enabled row's concept text to appear in the positive prompt. "
+                f"Missing token positions for: {', '.join(missing)}"
+            )
+
+        model_out = model.clone()
+        hook_model_obj = model_out.get_model_object("diffusion_model")
+        key_map_model_obj = getattr(model_out, "model", hook_model_obj)
+        layer_entries, lines = _build_layer_entries(key_map_model_obj, hook_model_obj, stack, apply_to)
+        aspect = float(canvas_width) / max(1.0, float(canvas_height))
+        state = BBoxFreeFuseApplierState(
+            stack=stack,
+            boxes=boxes,
+            layer_entries=layer_entries,
+            seam_feather=seam_feather,
+            outside_strength=outside_strength,
+            base_strength=base_strength,
+            token_offset_mode="auto_txt_img_pad_safe",
+            manual_image_start=0,
+            image_rows=0,
+            image_cols=0,
+            debug=bool(debug_logging),
+            canvas_aspect=aspect,
+            token_pos_maps=token_pos_maps,
+            bias_scale=bias_scale,
+            positive_bias_scale=positive_bias_scale,
+            bidirectional=bidirectional,
+            use_positive_bias=use_positive_bias,
+            bias_blocks=bias_blocks,
+            text_token_lora_strength=text_token_lora_strength,
+            enable_lora_masking=enable_lora_masking,
+            enable_attention_bias=enable_attention_bias,
+        )
+        model_out.add_wrapper_with_key(
+            patcher_extension.WrappersMP.DIFFUSION_MODEL,
+            WRAPPER_KEY + "_bbox_freefuse",
+            state.wrapper,
+        )
+        concept_lines = [
+            f"{alias}: concept_text={concepts.get(alias, alias)!r} token_positions={positions}"
+            for alias, positions in token_pos_maps.items()
+        ]
+        report = (
+            _format_basic_assignment_report(stack, boxes)
+            + "\nExecution mode: bbox-FreeFuse Krea2. BBoxes provide masks directly; node applies masked LoRA deltas plus FreeFuse-style attention bias."
+            + "\nMask source: external bbox assignments; this skips FreeFuse phase-1 similarity-map discovery."
+            + "\nPrompt requirement: each enabled row's alias or concepts_json override must appear in the positive prompt for token routing."
+            + f"\nSettings: bias_blocks={bias_blocks} bias_scale={float(bias_scale):.3f} positive_bias_scale={float(positive_bias_scale):.3f} "
+            + f"bidirectional={bool(bidirectional)} text_token_lora_strength={float(text_token_lora_strength):.3f} "
+            + f"enable_lora_masking={bool(enable_lora_masking)} enable_attention_bias={bool(enable_attention_bias)}"
+            + "\nConcept token positions:\n"
+            + "\n".join(concept_lines)
+            + "\n\nPatch summary:\n"
+            + "\n".join(lines)
+        )
+        return (model_out, report)
+
+
 class Krea2RegionalLoRAApply:
     @classmethod
     def INPUT_TYPES(cls):
@@ -2717,6 +3320,7 @@ NODE_CLASS_MAPPINGS = {
     "Krea2RegionalLoRACropExtract": Krea2RegionalLoRACropExtract,
     "Krea2RegionalLoRACropComposite": Krea2RegionalLoRACropComposite,
     "Krea2RegionMasksFromBBoxes": Krea2RegionMasksFromBBoxes,
+    "Krea2RegionalLoRAApplyBBoxFreeFuse": Krea2RegionalLoRAApplyBBoxFreeFuse,
     "Krea2RegionalLoRAApply": Krea2RegionalLoRAApply,
     "Krea2RegionalLoRAApplySimple": Krea2RegionalLoRAApplySimple,
     "Krea2RegionalLoRADiagnostics": Krea2RegionalLoRADiagnostics,
@@ -2729,6 +3333,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "Krea2RegionalLoRACropExtract": "Krea2 Regional LoRA Crop Extract",
     "Krea2RegionalLoRACropComposite": "Krea2 Regional LoRA Crop Composite",
     "Krea2RegionMasksFromBBoxes": "Krea2 Region Masks From BBoxes",
+    "Krea2RegionalLoRAApplyBBoxFreeFuse": "Krea2 Regional LoRA Apply BBox FreeFuse",
     "Krea2RegionalLoRAApply": "Krea2 Regional LoRA Apply",
     "Krea2RegionalLoRAApplySimple": "Krea2 Regional LoRA Apply Simple",
     "Krea2RegionalLoRADiagnostics": "Krea2 Regional LoRA Diagnostics",
