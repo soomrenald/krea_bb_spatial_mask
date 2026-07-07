@@ -358,10 +358,18 @@ class RegionalApplierState:
             )
         return result
 
-    def _install_selection_hooks(self, name_to_module: Dict[str, Any], selection_index: int, force_global: bool) -> List[Any]:
+    def _install_selection_hooks(
+        self,
+        name_to_module: Dict[str, Any],
+        selection_index: int,
+        force_global: bool,
+        scope_filter: Optional[str] = None,
+    ) -> List[Any]:
         handles = []
         for layer_name, entries in self.layer_entries.items():
             selected = [entry for entry in entries if entry.selection_index == selection_index]
+            if scope_filter is not None:
+                selected = [entry for entry in selected if entry.mask_scope == scope_filter]
             if not selected:
                 continue
             module = name_to_module.get(layer_name)
@@ -841,6 +849,230 @@ class RegionalApplierState:
         )
 
 
+class SimpleRegionalApplierState(RegionalApplierState):
+    """Fedor-style activation delta injection: runtime latent grid, one sequence mask for every matched layer."""
+
+    def wrapper(self, executor, *args, **kwargs):
+        model_obj = getattr(executor, "class_obj", None)
+        handles = []
+        transformer_options = _find_transformer_options(args, kwargs)
+        layout = self._simple_layout(args, kwargs, model_obj)
+        self.session = RuntimeSession(layout=layout, transformer_options=transformer_options, wrapper_calls=1)
+        try:
+            if model_obj is None:
+                return executor(*args, **kwargs)
+            name_to_module = dict(model_obj.named_modules())
+            for layer_name, entries in self.layer_entries.items():
+                module = name_to_module.get(layer_name)
+                if module is None:
+                    continue
+                handles.append(module.register_forward_hook(self._make_simple_hook(entries)))
+            if self.debug:
+                LOGGER.info("[Krea2RegionalMultiLoRA] simple mode installed %d hooks; layout=%s", len(handles), layout)
+            result = executor(*args, **kwargs)
+            if self.debug:
+                LOGGER.info(
+                    "[Krea2RegionalMultiLoRA] simple mode stats: hooks=%d applied=%d skipped=%d observed_seq_lens=%s mask_debug=%s layout=%s",
+                    self.session.hook_calls,
+                    self.session.applied_calls,
+                    self.session.skipped_no_mask,
+                    dict(sorted(self.session.observed_seq_lens.items())),
+                    _format_sample(self.session.mask_debug.values(), 4),
+                    self.session.layout,
+                )
+            return result
+        finally:
+            for h in handles:
+                try:
+                    h.remove()
+                except Exception:
+                    pass
+            self.session = None
+
+    def _simple_layout(self, args: Sequence[Any], kwargs: Dict[str, Any], model_obj: Any) -> TokenLayout:
+        txtlen = None
+        context = kwargs.get("context", None)
+        if context is None and len(args) >= 3:
+            context = args[2]
+        if torch.is_tensor(context) and context.ndim == 3:
+            txtlen = int(context.shape[1])
+
+        rows = self.image_rows if self.image_rows > 0 else None
+        cols = self.image_cols if self.image_cols > 0 else None
+        source = ["simple"]
+        if (not rows or not cols) and args and torch.is_tensor(args[0]) and args[0].ndim >= 4:
+            h = int(args[0].shape[-2])
+            w = int(args[0].shape[-1])
+            patch_size = int(getattr(model_obj, "patch_size", 2) or 2)
+            rows = max(1, h // max(1, patch_size))
+            cols = max(1, w // max(1, patch_size))
+            source.append(f"latent_{h}x{w}_p{patch_size}")
+        if not rows or not cols:
+            rows = max(1, int(round(math.sqrt(4096 / max(1e-6, self.canvas_aspect)))))
+            cols = max(1, int(round(rows * self.canvas_aspect)))
+            source.append("canvas_fallback")
+        if txtlen is not None:
+            source.append("context_txtlen")
+        return TokenLayout(imglen=int(rows * cols), txtlen=txtlen, rows=int(rows), cols=int(cols), source="+".join(source))
+
+    def _make_simple_hook(self, entries: List[LayerPatch]):
+        def hook(module, inputs, output):
+            session = self.session
+            if session is None or not torch.is_tensor(output) or not inputs:
+                return output
+            session.hook_calls += 1
+            x = inputs[0]
+            if not torch.is_tensor(x) or x.ndim < 2 or output.ndim < 2 or x.shape[:-1] != output.shape[:-1]:
+                return output
+            seq_len = int(x.shape[-2])
+            session.observed_seq_lens[seq_len] = session.observed_seq_lens.get(seq_len, 0) + 1
+            out = output
+            compute_dtype = _compute_dtype_for(x)
+            for entry in entries:
+                selection = self.stack.selections[entry.selection_index]
+                if not selection.enabled:
+                    continue
+                mask = self._simple_mask_for_selection(entry.selection_index, seq_len, x.device, compute_dtype)
+                if mask is None:
+                    session.skipped_no_mask += 1
+                    continue
+                if self.outside_strength != 0.0:
+                    mask = mask + (1.0 - mask) * self.outside_strength
+                if self.debug:
+                    self._log_runtime_mask(entry, seq_len, mask)
+                mask = _reshape_token_mask(mask, x.ndim)
+                down, up = self._matrices_on_device(entry, x.device, compute_dtype)
+                xin = x.to(dtype=compute_dtype) if x.dtype != compute_dtype else x
+                delta = F.linear(F.linear(xin, down), up)
+                delta = delta * (entry.matrices.scale * entry.strength * self.base_strength)
+                out = out + (delta * mask).to(dtype=out.dtype)
+                session.applied_calls += 1
+            return out
+
+        return hook
+
+    def _simple_mask_for_selection(self, selection_index: int, seq_len: int, device: torch.device, dtype: torch.dtype) -> Optional[torch.Tensor]:
+        session = self.session
+        assert session is not None
+        layout = session.layout
+        rows, cols, imglen = layout.rows, layout.cols, layout.imglen
+        if not rows or not cols or not imglen:
+            return None
+        key = (selection_index, seq_len, str(device), str(dtype))
+        cached = session.mask_cache.get(key)
+        if cached is not None:
+            return cached
+        selection = self.stack.selections[selection_index]
+        box_indices = [i for i in selection.boxes if 0 <= i < len(self.boxes)]
+        if not box_indices:
+            return None
+        token_mask = torch.zeros((rows * cols,), dtype=torch.float32)
+        for box_index in box_indices:
+            token_mask = torch.maximum(token_mask, _rect_token_mask(rows, cols, self.boxes[box_index], self.seam_feather))
+        token_mask = token_mask.to(device=device, dtype=dtype)
+        full = torch.zeros((seq_len,), device=device, dtype=dtype)
+        source = "simple"
+        if imglen > seq_len:
+            full[:] = token_mask.mean()
+            source = "simple_mean_for_short_seq"
+        else:
+            start = seq_len - imglen
+            if layout.txtlen is not None and 0 <= int(layout.txtlen) <= seq_len - imglen:
+                start = int(layout.txtlen)
+                source = "simple_after_txt"
+            else:
+                source = "simple_trailing"
+            full[start:start + imglen] = token_mask
+        self._record_mask_debug(selection_index, seq_len, source, 0 if imglen > seq_len else start, min(imglen, seq_len), rows, cols, token_mask)
+        full = full.view(1, seq_len, 1)
+        session.mask_cache[key] = full
+        return full
+
+
+class DiagnosticRegionalApplierState(RegionalApplierState):
+    def __init__(self, *args, diagnostic_lora_limit: int = 2, max_steps: int = 1, return_mode: str = "passthrough", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.diagnostic_lora_limit = max(1, int(diagnostic_lora_limit))
+        self.max_steps = max(1, int(max_steps))
+        self.return_mode = return_mode
+        self._calls = 0
+
+    def wrapper(self, executor, *args, **kwargs):
+        model_obj = getattr(executor, "class_obj", None)
+        transformer_options = _find_transformer_options(args, kwargs)
+        layout = self._infer_layout(args, kwargs)
+        self._apply_runtime_latent_grid(layout, args, model_obj)
+        self.session = RuntimeSession(layout=layout, transformer_options=transformer_options, wrapper_calls=1)
+        try:
+            base = executor(*args, **kwargs)
+            if model_obj is None or not torch.is_tensor(base):
+                return base
+            self._calls += 1
+            if self._calls > self.max_steps:
+                return base
+            name_to_module = dict(model_obj.named_modules())
+            selected_indices = [
+                i for i, s in enumerate(self.stack.selections)
+                if s.enabled and i < len(self.stack.selections)
+            ][: self.diagnostic_lora_limit]
+            reports: List[str] = []
+            return_tensor = base
+            for selection_index in selected_indices:
+                selection = self.stack.selections[selection_index]
+                bbox_mask = self._output_mask_for_selection(selection_index, base)
+                for label, force_global, scope_filter in (
+                    ("global_all", True, None),
+                    ("global_blocks_only", True, "regional"),
+                    ("global_txtfusion_only", True, "global_conditioning"),
+                    ("token_masked_all", False, None),
+                ):
+                    out = self._run_variant(executor, args, kwargs, name_to_module, selection_index, force_global, scope_filter)
+                    if out is None:
+                        reports.append(f"{selection.alias}:{label}=no_hooks")
+                        continue
+                    reports.append(f"{selection.alias}:{label} {_delta_stats(base, out, bbox_mask)}")
+                    if self.return_mode == f"{label}_first" and return_tensor is base:
+                        return_tensor = out
+                if bbox_mask is not None:
+                    reports.append(
+                        f"{selection.alias}:output_mask shape={tuple(bbox_mask.shape)} sum={float(bbox_mask.sum().detach().cpu()):.2f} max={float(bbox_mask.max().detach().cpu()):.4f}"
+                    )
+            LOGGER.info(
+                "[Krea2RegionalMultiLoRA] diagnostic step=%d output_shape=%s layout=%s observed_seq_lens=%s reports=%s",
+                self._calls,
+                tuple(base.shape),
+                self.session.layout,
+                dict(sorted(self.session.observed_seq_lens.items())),
+                " | ".join(reports),
+            )
+            return return_tensor
+        finally:
+            self.session = None
+
+    def _run_variant(
+        self,
+        executor,
+        args: Sequence[Any],
+        kwargs: Dict[str, Any],
+        name_to_module: Dict[str, Any],
+        selection_index: int,
+        force_global: bool,
+        scope_filter: Optional[str],
+    ) -> Optional[torch.Tensor]:
+        handles = self._install_selection_hooks(name_to_module, selection_index, force_global=force_global, scope_filter=scope_filter)
+        if not handles:
+            return None
+        try:
+            out = executor(*args, **kwargs)
+        finally:
+            for h in handles:
+                try:
+                    h.remove()
+                except Exception:
+                    pass
+        return out if torch.is_tensor(out) else None
+
+
 # -------------------- generic helpers --------------------
 
 
@@ -1087,6 +1319,35 @@ def _spatial_broadcast_shape(tensor: torch.Tensor) -> Tuple[int, ...]:
     if tensor.ndim >= 2:
         return (1,) * (tensor.ndim - 1) + (1,)
     return (1,)
+
+
+def _delta_stats(base: torch.Tensor, other: torch.Tensor, mask: Optional[torch.Tensor] = None) -> str:
+    if not torch.is_tensor(base) or not torch.is_tensor(other) or base.shape != other.shape:
+        return f"shape_mismatch base={getattr(base, 'shape', None)} other={getattr(other, 'shape', None)}"
+    delta = (other - base).detach().abs().to(dtype=torch.float32)
+    parts = [
+        f"mean={float(delta.mean().cpu()):.6f}",
+        f"max={float(delta.max().cpu()):.6f}",
+    ]
+    if mask is not None and torch.is_tensor(mask):
+        m = mask.detach().to(device=delta.device, dtype=torch.float32)
+        while m.ndim < delta.ndim:
+            m = m.unsqueeze(1)
+        inside_w = m.clamp(0.0, 1.0)
+        outside_w = 1.0 - inside_w
+        inside_full = torch.ones_like(delta) * inside_w
+        outside_full = torch.ones_like(delta) * outside_w
+        inside_den = inside_full.sum().clamp_min(1.0)
+        outside_den = outside_full.sum().clamp_min(1.0)
+        parts.extend(
+            [
+                f"inside_mean={float((delta * inside_w).sum().cpu() / inside_den.cpu()):.6f}",
+                f"outside_mean={float((delta * outside_w).sum().cpu() / outside_den.cpu()):.6f}",
+                f"mask_sum={float(inside_w.sum().cpu()):.2f}",
+                f"mask_max={float(inside_w.max().cpu()):.4f}",
+            ]
+        )
+    return " ".join(parts)
 
 
 # -------------------- bbox parsing --------------------
@@ -1726,6 +1987,172 @@ class Krea2RegionalLoRAApply:
         return (model_out, report)
 
 
+class Krea2RegionalLoRAApplySimple:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return Krea2RegionalLoRAApply.INPUT_TYPES()
+
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("model", "report")
+    FUNCTION = "apply"
+    CATEGORY = "Krea2/Regional LoRA"
+
+    def apply(
+        self,
+        model,
+        lora_stack,
+        canvas_width,
+        canvas_height,
+        bbox_list_format,
+        seam_feather,
+        outside_strength,
+        base_strength,
+        token_offset_mode,
+        manual_image_start,
+        image_rows,
+        image_cols,
+        apply_to,
+        debug_logging,
+        bboxes=None,
+        kj_bboxes=None,
+        ideogram_prompt_json="",
+    ):
+        if patcher_extension is None:
+            raise RuntimeError("This node requires a recent ComfyUI build with comfy.patcher_extension")
+        stack = _parse_lora_stack(json.dumps(lora_stack.get("selections", []))) if isinstance(lora_stack, dict) else _parse_lora_stack(lora_stack)
+        boxes = _collect_boxes(bboxes, kj_bboxes, ideogram_prompt_json, canvas_width, canvas_height, bbox_list_format)
+        if not stack.selections:
+            return (model, "No LoRAs selected.")
+        if not boxes:
+            return (model, _format_assignment_report(stack, []) + "\nNo external boxes were provided.")
+
+        model_out = model.clone()
+        hook_model_obj = model_out.get_model_object("diffusion_model")
+        key_map_model_obj = getattr(model_out, "model", hook_model_obj)
+        layer_entries, lines = _build_layer_entries(key_map_model_obj, hook_model_obj, stack, apply_to)
+        aspect = float(canvas_width) / max(1.0, float(canvas_height))
+        state = SimpleRegionalApplierState(
+            stack=stack,
+            boxes=boxes,
+            layer_entries=layer_entries,
+            seam_feather=seam_feather,
+            outside_strength=outside_strength,
+            base_strength=base_strength,
+            token_offset_mode=token_offset_mode,
+            manual_image_start=manual_image_start,
+            image_rows=image_rows,
+            image_cols=image_cols,
+            debug=bool(debug_logging),
+            canvas_aspect=aspect,
+        )
+        model_out.add_wrapper_with_key(
+            patcher_extension.WrappersMP.DIFFUSION_MODEL,
+            WRAPPER_KEY + "_simple",
+            state.wrapper,
+        )
+        report = (
+            _format_assignment_report(stack, boxes)
+            + "\nExecution mode: simple activation-delta injection, modeled after the external Fedor node. "
+            + "Uses runtime latent_grid/patch_size and applies the same full-sequence regional mask to txtfusion and image blocks; short text-only sequences receive mask mean, not full global strength."
+            + "\n\nPatch summary:\n"
+            + "\n".join(lines)
+        )
+        return (model_out, report)
+
+
+class Krea2RegionalLoRADiagnostics:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "lora_stack": (LORA_STACK_TYPE,),
+                "canvas_width": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "canvas_height": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "bbox_list_format": (["xywh", "xyxy", "auto"], {"default": "xywh"}),
+                "seam_feather": ("FLOAT", {"default": 0.05, "min": 0.0, "max": 1.0, "step": 0.005}),
+                "base_strength": ("FLOAT", {"default": 1.0, "min": -5.0, "max": 5.0, "step": 0.01}),
+                "apply_to": (["krea_blocks_only", "all_matched_linears"], {"default": "krea_blocks_only"}),
+                "diagnostic_lora_limit": ("INT", {"default": 2, "min": 1, "max": 8}),
+                "max_steps": ("INT", {"default": 1, "min": 1, "max": 32}),
+                "return_mode": (["passthrough", "global_all_first", "global_blocks_only_first", "global_txtfusion_only_first", "token_masked_all_first"], {"default": "passthrough"}),
+            },
+            "optional": {
+                "bboxes": ("BOUNDING_BOX",),
+                "kj_bboxes": ("BBOX",),
+                "ideogram_prompt_json": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("model", "report")
+    FUNCTION = "diagnose"
+    CATEGORY = "Krea2/Regional LoRA"
+
+    def diagnose(
+        self,
+        model,
+        lora_stack,
+        canvas_width,
+        canvas_height,
+        bbox_list_format,
+        seam_feather,
+        base_strength,
+        apply_to,
+        diagnostic_lora_limit,
+        max_steps,
+        return_mode,
+        bboxes=None,
+        kj_bboxes=None,
+        ideogram_prompt_json="",
+    ):
+        if patcher_extension is None:
+            raise RuntimeError("This node requires a recent ComfyUI build with comfy.patcher_extension")
+        stack = _parse_lora_stack(json.dumps(lora_stack.get("selections", []))) if isinstance(lora_stack, dict) else _parse_lora_stack(lora_stack)
+        boxes = _collect_boxes(bboxes, kj_bboxes, ideogram_prompt_json, canvas_width, canvas_height, bbox_list_format)
+        if not stack.selections:
+            return (model, "No LoRAs selected.")
+        if not boxes:
+            return (model, _format_assignment_report(stack, []) + "\nNo external boxes were provided.")
+
+        model_out = model.clone()
+        hook_model_obj = model_out.get_model_object("diffusion_model")
+        key_map_model_obj = getattr(model_out, "model", hook_model_obj)
+        layer_entries, lines = _build_layer_entries(key_map_model_obj, hook_model_obj, stack, apply_to)
+        aspect = float(canvas_width) / max(1.0, float(canvas_height))
+        state = DiagnosticRegionalApplierState(
+            stack=stack,
+            boxes=boxes,
+            layer_entries=layer_entries,
+            seam_feather=seam_feather,
+            outside_strength=0.0,
+            base_strength=base_strength,
+            token_offset_mode="auto_txt_img_pad_safe",
+            manual_image_start=0,
+            image_rows=0,
+            image_cols=0,
+            debug=True,
+            canvas_aspect=aspect,
+            diagnostic_lora_limit=diagnostic_lora_limit,
+            max_steps=max_steps,
+            return_mode=return_mode,
+        )
+        model_out.add_wrapper_with_key(
+            patcher_extension.WrappersMP.DIFFUSION_MODEL,
+            WRAPPER_KEY + "_diagnostics",
+            state.wrapper,
+        )
+        report = (
+            _format_assignment_report(stack, boxes)
+            + "\nDiagnostic mode: pass-through by default. During sampling, logs baseline-vs-LoRA output delta for global_all, global_blocks_only, global_txtfusion_only, and token_masked_all. "
+            + "Use the console log lines beginning '[Krea2RegionalMultiLoRA] diagnostic'."
+            + f"\nSettings: lora_limit={int(diagnostic_lora_limit)} max_steps={int(max_steps)} return_mode={return_mode}"
+            + "\n\nPatch summary:\n"
+            + "\n".join(lines)
+        )
+        return (model_out, report)
+
+
 class Krea2RegionalLoRAPreview:
     @classmethod
     def INPUT_TYPES(cls):
@@ -1761,11 +2188,15 @@ class Krea2RegionalLoRAPreview:
 NODE_CLASS_MAPPINGS = {
     "Krea2MultiLoRALoader": Krea2MultiLoRALoader,
     "Krea2RegionalLoRAApply": Krea2RegionalLoRAApply,
+    "Krea2RegionalLoRAApplySimple": Krea2RegionalLoRAApplySimple,
+    "Krea2RegionalLoRADiagnostics": Krea2RegionalLoRADiagnostics,
     "Krea2RegionalLoRAPreview": Krea2RegionalLoRAPreview,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Krea2MultiLoRALoader": "Krea2 Multi LoRA Loader",
     "Krea2RegionalLoRAApply": "Krea2 Regional LoRA Apply",
+    "Krea2RegionalLoRAApplySimple": "Krea2 Regional LoRA Apply Simple",
+    "Krea2RegionalLoRADiagnostics": "Krea2 Regional LoRA Diagnostics",
     "Krea2RegionalLoRAPreview": "Krea2 Regional LoRA Preview",
 }
