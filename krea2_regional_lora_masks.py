@@ -65,7 +65,7 @@ WEB_DIRECTORY = "./web"
 WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
-NODE_VERSION = "2026-07-06.10-krea-position-id-mask"
+NODE_VERSION = "2026-07-06.12-runtime-mask-coverage-debug"
 TEXT_TOKEN_STRENGTH = 0.0
 KREA_OUTPUT_IMAGE_INDICATOR = 2
 
@@ -173,6 +173,7 @@ class TokenLayout:
     rows: Optional[int] = None
     cols: Optional[int] = None
     source: str = "unknown"
+    grid_candidates: List[Tuple[int, int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -181,6 +182,9 @@ class RuntimeSession:
     transformer_options: Dict[str, Any] = field(default_factory=dict)
     mask_cache: Dict[Tuple[int, int, str, str], torch.Tensor] = field(default_factory=dict)
     tensor_cache: Dict[Tuple[int, str, str, str], Tuple[torch.Tensor, torch.Tensor]] = field(default_factory=dict)
+    observed_seq_lens: Dict[int, int] = field(default_factory=dict)
+    mask_debug: Dict[Tuple[int, int], str] = field(default_factory=dict)
+    debug_logged: set = field(default_factory=set)
     warned: set = field(default_factory=set)
     wrapper_calls: int = 0
     hook_calls: int = 0
@@ -257,10 +261,12 @@ class RegionalApplierState:
             result = executor(*args, **kwargs)
             if self.debug:
                 LOGGER.info(
-                    "[Krea2RegionalMultiLoRA] runtime stats: hooks=%d applied=%d skipped_no_mask=%d geometry_updates=%d geometry=%s seq=%s grid=%sx%s transformer_img_slice=%s layout=%s",
+                    "[Krea2RegionalMultiLoRA] runtime stats: hooks=%d applied=%d skipped_no_mask=%d observed_seq_lens=%s mask_debug=%s geometry_updates=%d geometry=%s seq=%s grid=%sx%s transformer_img_slice=%s layout=%s",
                     self.session.hook_calls,
                     self.session.applied_calls,
                     self.session.skipped_no_mask,
+                    dict(sorted(self.session.observed_seq_lens.items())),
+                    _format_sample(self.session.mask_debug.values(), 4),
                     self.session.geometry_updates,
                     self.session.geometry_source,
                     self.session.geometry_seq_len,
@@ -434,12 +440,16 @@ class RegionalApplierState:
         h = int(latent.shape[-2])
         w = int(latent.shape[-1])
         patch_size = int(getattr(model_obj, "patch_size", 2) or 2)
-        rows = max(1, (h + (patch_size // 2)) // patch_size)
-        cols = max(1, (w + (patch_size // 2)) // patch_size)
-        layout.rows = rows
-        layout.cols = cols
-        layout.imglen = rows * cols
-        layout.source = (layout.source + f"+latent_grid_{h}x{w}_p{patch_size}").strip("+")
+        layout.grid_candidates.append((h, w, f"latent_hw_{h}x{w}"))
+        if patch_size > 1 and h >= patch_size and w >= patch_size:
+            layout.grid_candidates.append((max(1, h // patch_size), max(1, w // patch_size), f"latent_div_patch_{h}x{w}_p{patch_size}"))
+        if h >= 2 and w >= 2 and patch_size != 2:
+            layout.grid_candidates.append((max(1, h // 2), max(1, w // 2), f"latent_div_2_{h}x{w}"))
+        if layout.imglen is None:
+            layout.rows = h
+            layout.cols = w
+            layout.imglen = h * w
+        layout.source = (layout.source + f"+latent_candidates_{h}x{w}_p{patch_size}").strip("+")
 
     def _make_forward_hook(self, entries: List[LayerPatch]):
         def hook(module, inputs, output):
@@ -453,6 +463,7 @@ class RegionalApplierState:
             if x.shape[:-1] != output.shape[:-1]:
                 return output
             seq_len = int(x.shape[-2])
+            session.observed_seq_lens[seq_len] = session.observed_seq_lens.get(seq_len, 0) + 1
             out = output
             compute_dtype = _compute_dtype_for(x)
             for entry in entries:
@@ -479,18 +490,9 @@ class RegionalApplierState:
                         continue
                 elif self.outside_strength != 0.0:
                     mask = mask + (1.0 - mask) * self.outside_strength
+                if self.debug:
+                    self._log_runtime_mask(entry, seq_len, mask)
                 mask = _reshape_token_mask(mask, x.ndim)
-                if self.debug and seq_len not in session.warned:
-                    if self.outside_strength != 0.0 and mask is not None:
-                        session.warned.add(seq_len)
-                        LOGGER.info(
-                            "[Krea2RegionalMultiLoRA] applying LoRA delta for seq_len=%s mask_range=(%.4f, %.4f) layout=%s layer=%s",
-                            seq_len,
-                            float(mask.min().detach().cpu()),
-                            float(mask.max().detach().cpu()),
-                            session.layout,
-                            entry.layer_name,
-                        )
                 down, up = self._matrices_on_device(entry, x.device, compute_dtype)
                 xin = x.to(dtype=compute_dtype) if x.dtype != compute_dtype else x
                 delta = F.linear(F.linear(xin, down), up)
@@ -513,6 +515,35 @@ class RegionalApplierState:
         session.tensor_cache[key] = (down, up)
         return down, up
 
+    def _log_runtime_mask(self, entry: LayerPatch, seq_len: int, mask: torch.Tensor) -> None:
+        session = self.session
+        if session is None:
+            return
+        key = (entry.selection_index, seq_len, entry.mask_scope)
+        if key in session.debug_logged:
+            return
+        session.debug_logged.add(key)
+        selection = self.stack.selections[entry.selection_index]
+        flat = mask.reshape(-1)
+        max_value = float(flat.max().detach().cpu()) if flat.numel() else 0.0
+        min_value = float(flat.min().detach().cpu()) if flat.numel() else 0.0
+        sum_value = float(flat.sum().detach().cpu()) if flat.numel() else 0.0
+        nonzero = int((flat.abs() > 1e-5).sum().detach().cpu().item()) if flat.numel() else 0
+        info = session.mask_debug.get((entry.selection_index, seq_len), "global_or_unknown_span")
+        LOGGER.info(
+            "[Krea2RegionalMultiLoRA] mask coverage alias=%s seq_len=%d scope=%s range=(%.4f, %.4f) sum=%.2f nonzero=%d outside=%.4f info=%s first_layer=%s",
+            selection.alias,
+            seq_len,
+            entry.mask_scope,
+            min_value,
+            max_value,
+            sum_value,
+            nonzero,
+            self.outside_strength,
+            info,
+            entry.layer_name,
+        )
+
     def _mask_for_selection(self, selection_index: int, seq_len: int, device: torch.device, dtype: torch.dtype) -> Optional[torch.Tensor]:
         session = self.session
         assert session is not None
@@ -521,53 +552,15 @@ class RegionalApplierState:
         if geometry_mask is not None:
             return geometry_mask
 
-        img_slice = session.transformer_options.get("img_slice")
-        if isinstance(img_slice, (list, tuple)) and len(img_slice) >= 2:
-            try:
-                image_start = int(img_slice[0])
-                image_end = int(img_slice[1])
-                slice_imglen = max(0, image_end - image_start)
-                grid_imglen = (layout.rows or 0) * (layout.cols or 0)
-                imglen = grid_imglen if grid_imglen > 0 and grid_imglen <= slice_imglen else slice_imglen
-                if imglen > 0:
-                    layout.imglen = imglen
-                    layout.txtlen = image_start
-                    if "img_slice" not in layout.source:
-                        layout.source = (layout.source + "+img_slice").strip("+")
-            except Exception:
-                imglen = layout.imglen
-        else:
-            imglen = layout.imglen
-            if (imglen is None or imglen <= 0) and layout.txtlen is not None and seq_len > layout.txtlen:
-                imglen = seq_len - int(layout.txtlen)
-                layout.imglen = imglen
-                if "seq_minus_txt" not in layout.source:
-                    layout.source = (layout.source + "+seq_minus_txt").strip("+")
-        if imglen is None or imglen <= 0:
+        chosen = self._choose_image_span(seq_len)
+        if chosen is None:
             return None
-        rows, cols = layout.rows, layout.cols
-        if not rows or not cols or rows * cols != imglen:
-            rows, cols = _infer_grid(imglen, self.image_rows, self.image_cols, self.canvas_aspect)
-        if not rows or not cols or rows * cols != imglen:
-            return None
+        image_start, imglen, rows, cols, source = chosen
+        layout.imglen = imglen
         layout.rows = rows
         layout.cols = cols
-
-        if isinstance(img_slice, (list, tuple)) and len(img_slice) >= 2:
-            image_start = int(img_slice[0])
-        elif self.token_offset_mode == "manual":
-            image_start = max(0, int(self.manual_image_start))
-        elif seq_len == imglen:
-            image_start = 0
-        elif self.token_offset_mode == "legacy_trailing":
-            image_start = max(0, seq_len - imglen)
-        elif layout.txtlen is not None and seq_len >= layout.txtlen + imglen:
-            image_start = int(layout.txtlen)
-        else:
-            image_start = max(0, seq_len - imglen)
-
-        if image_start + imglen > seq_len:
-            return None
+        if source not in layout.source:
+            layout.source = (layout.source + f"+{source}").strip("+")
 
         key = (selection_index, seq_len, str(device), str(dtype))
         cached = session.mask_cache.get(key)
@@ -591,8 +584,90 @@ class RegionalApplierState:
             full[:image_start] = float(TEXT_TOKEN_STRENGTH)
         full[image_start:image_start + imglen] = token_mask
         full = full.view(1, seq_len, 1)
+        self._record_mask_debug(
+            selection_index,
+            seq_len,
+            source,
+            image_start,
+            imglen,
+            rows,
+            cols,
+            token_mask,
+        )
         session.mask_cache[key] = full
         return full
+
+    def _choose_image_span(self, seq_len: int) -> Optional[Tuple[int, int, int, int, str]]:
+        session = self.session
+        assert session is not None
+        layout = session.layout
+        candidates: List[Tuple[int, int, str]] = []
+
+        if layout.txtlen is not None:
+            txtlen = int(layout.txtlen)
+            if 0 <= txtlen < seq_len:
+                candidates.append((txtlen, seq_len - txtlen, "seq_minus_txt"))
+
+        img_slice = session.transformer_options.get("img_slice")
+        if isinstance(img_slice, (list, tuple)) and len(img_slice) >= 2:
+            try:
+                image_start = max(0, int(img_slice[0]))
+                image_end = min(seq_len, int(img_slice[1]))
+                if image_end > image_start:
+                    candidates.append((image_start, image_end - image_start, "img_slice"))
+            except Exception:
+                pass
+
+        for rows, cols, source in layout.grid_candidates:
+            imglen = int(rows) * int(cols)
+            if imglen <= 0 or imglen > seq_len:
+                continue
+            if seq_len == imglen:
+                candidates.append((0, imglen, source))
+            if layout.txtlen is not None and 0 <= int(layout.txtlen) <= seq_len - imglen:
+                candidates.append((int(layout.txtlen), imglen, source + "_after_txt"))
+            candidates.append((seq_len - imglen, imglen, source + "_trailing"))
+
+        if layout.imglen is not None and int(layout.imglen) > 0 and int(layout.imglen) <= seq_len:
+            imglen = int(layout.imglen)
+            if seq_len == imglen:
+                candidates.append((0, imglen, "layout_exact"))
+            if layout.txtlen is not None and 0 <= int(layout.txtlen) <= seq_len - imglen:
+                candidates.append((int(layout.txtlen), imglen, "layout_after_txt"))
+            if self.token_offset_mode == "manual":
+                candidates.append((max(0, int(self.manual_image_start)), imglen, "manual"))
+            candidates.append((seq_len - imglen, imglen, "layout_trailing"))
+
+        if self.image_rows > 0 and self.image_cols > 0:
+            imglen = self.image_rows * self.image_cols
+            if imglen <= seq_len:
+                start = int(layout.txtlen) if layout.txtlen is not None and int(layout.txtlen) <= seq_len - imglen else seq_len - imglen
+                candidates.append((start, imglen, "manual_grid"))
+
+        seen = set()
+        for image_start, imglen, source in candidates:
+            if imglen <= 0 or image_start < 0 or image_start + imglen > seq_len:
+                continue
+            ident = (image_start, imglen)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            rows, cols = self._grid_for_imglen(imglen)
+            if rows and cols and rows * cols == imglen:
+                return image_start, imglen, rows, cols, source
+        return None
+
+    def _grid_for_imglen(self, imglen: int) -> Tuple[Optional[int], Optional[int]]:
+        layout = self.session.layout if self.session is not None else None
+        if self.image_rows > 0 and self.image_cols > 0 and self.image_rows * self.image_cols == imglen:
+            return self.image_rows, self.image_cols
+        if layout is not None:
+            for rows, cols, _source in layout.grid_candidates:
+                if rows * cols == imglen:
+                    return rows, cols
+            if layout.rows and layout.cols and layout.rows * layout.cols == imglen:
+                return layout.rows, layout.cols
+        return _infer_grid(imglen, self.image_rows, self.image_cols, self.canvas_aspect)
 
     def _mask_from_krea_geometry(self, selection_index: int, seq_len: int, device: torch.device, dtype: torch.dtype) -> Optional[torch.Tensor]:
         session = self.session
@@ -628,8 +703,46 @@ class RegionalApplierState:
             full[~image_mask] = float(TEXT_TOKEN_STRENGTH)
         full[image_mask] = token_mask[image_mask].to(dtype=dtype)
         full = full.view(1, seq_len, 1)
+        self._record_mask_debug(
+            selection_index,
+            seq_len,
+            "krea_position_ids",
+            0,
+            int(image_mask.sum().detach().cpu().item()),
+            session.geometry_rows or 0,
+            session.geometry_cols or 0,
+            token_mask[image_mask],
+        )
         session.mask_cache[key] = full
         return full
+
+    def _record_mask_debug(
+        self,
+        selection_index: int,
+        seq_len: int,
+        source: str,
+        image_start: int,
+        imglen: int,
+        rows: int,
+        cols: int,
+        token_mask: torch.Tensor,
+    ) -> None:
+        session = self.session
+        if session is None:
+            return
+        if token_mask.numel() == 0:
+            mask_sum = 0.0
+            mask_max = 0.0
+            nonzero = 0
+        else:
+            flat = token_mask.reshape(-1)
+            mask_sum = float(flat.sum().detach().cpu())
+            mask_max = float(flat.max().detach().cpu())
+            nonzero = int((flat.abs() > 1e-5).sum().detach().cpu().item())
+        session.mask_debug[(selection_index, seq_len)] = (
+            f"source={source} start={image_start} imglen={imglen} grid={rows}x{cols} "
+            f"token_sum={mask_sum:.2f} token_max={mask_max:.4f} token_nonzero={nonzero}"
+        )
 
 
 # -------------------- generic helpers --------------------
@@ -1325,7 +1438,8 @@ def _format_assignment_report(stack: LoraStack, boxes: List[Tuple[float, float, 
         f"Krea2 Regional LoRA node version: {NODE_VERSION}",
         f"Mask semantics: text_token_strength={TEXT_TOKEN_STRENGTH:.3f}, image_tokens=bbox_mask, padding_tokens=outside_strength",
         "Mask scope: txtfusion/textfusion LoRA layers apply globally as conditioning; image/block layers apply regionally",
-        "Mask layout: Krea _backbone position_ids/indicator first; runtime latent grid only as fallback",
+        "Mask layout: Krea _backbone position_ids/indicator first; fallback chooses image span from live seq_len/text length before latent-grid guesses",
+        "Runtime debug: logs observed_seq_lens plus per-LoRA mask source/start/imglen/grid/sum/max/nonzero when debug_logging=True",
         f"LoRA count: {len(stack.selections)}",
         f"BBox count: {len(boxes)}",
         "Assignments:",
