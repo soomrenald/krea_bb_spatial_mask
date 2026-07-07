@@ -45,10 +45,12 @@ except Exception:  # pragma: no cover
 try:
     import comfy.lora as comfy_lora
     import comfy.lora_convert as comfy_lora_convert
+    import comfy.sd as comfy_sd
     import comfy.utils as comfy_utils
 except Exception:  # pragma: no cover
     comfy_lora = None
     comfy_lora_convert = None
+    comfy_sd = None
     comfy_utils = None
 
 try:
@@ -65,7 +67,8 @@ WEB_DIRECTORY = "./web"
 WRAPPER_KEY = "krea2_regional_multi_lora_standalone_v1"
 NONE_LORA = "None"
 LORA_STACK_TYPE = "KREA2_MULTI_LORA_STACK"
-NODE_VERSION = "2026-07-06.13-output-delta-blend"
+CROP_INFO_TYPE = "KREA2_REGION_CROP"
+NODE_VERSION = "2026-07-06.14-crop-composite-controls"
 TEXT_TOKEN_STRENGTH = 0.0
 KREA_OUTPUT_IMAGE_INDICATOR = 2
 OUTPUT_DELTA_BLEND_MODE = True
@@ -852,6 +855,8 @@ class RegionalApplierState:
 class SimpleRegionalApplierState(RegionalApplierState):
     """Fedor-style activation delta injection: runtime latent grid, one sequence mask for every matched layer."""
 
+    txtfusion_strength: float = 0.0
+
     def wrapper(self, executor, *args, **kwargs):
         model_obj = getattr(executor, "class_obj", None)
         handles = []
@@ -938,6 +943,8 @@ class SimpleRegionalApplierState(RegionalApplierState):
                     continue
                 if self.outside_strength != 0.0:
                     mask = mask + (1.0 - mask) * self.outside_strength
+                if entry.mask_scope == "global_conditioning":
+                    mask = mask * float(getattr(self, "txtfusion_strength", 0.0))
                 if self.debug:
                     self._log_runtime_mask(entry, seq_len, mask)
                 mask = _reshape_token_mask(mask, x.ndim)
@@ -1874,6 +1881,241 @@ def _draw_preview(stack: LoraStack, boxes: List[Tuple[float, float, float, float
     return tensor.unsqueeze(0)
 
 
+def _bbox_mask_image(width: int, height: int, bbox: Tuple[float, float, float, float], feather: float) -> torch.Tensor:
+    return _rect_token_mask(height, width, bbox, feather).view(height, width)
+
+
+def _grow_mask(mask: torch.Tensor, grow: int) -> torch.Tensor:
+    grow = int(grow)
+    if grow <= 0:
+        return mask
+    x = mask.unsqueeze(0).unsqueeze(0)
+    k = grow * 2 + 1
+    x = F.max_pool2d(x, kernel_size=k, stride=1, padding=grow)
+    return x[0, 0].clamp(0.0, 1.0)
+
+
+def _blur_mask(mask: torch.Tensor, radius: int) -> torch.Tensor:
+    radius = int(radius)
+    if radius <= 0:
+        return mask
+    x = mask.unsqueeze(0).unsqueeze(0)
+    k = radius * 2 + 1
+    for _ in range(2):
+        x = F.avg_pool2d(x, kernel_size=k, stride=1, padding=radius)
+    return x[0, 0].clamp(0.0, 1.0)
+
+
+def _region_masks_from_stack(
+    stack: LoraStack,
+    boxes: List[Tuple[float, float, float, float]],
+    width: int,
+    height: int,
+    feather: float,
+    grow: int,
+    blur: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, List[str]]:
+    masks: List[torch.Tensor] = []
+    colors: List[Tuple[float, float, float]] = []
+    reports: List[str] = []
+    for index, selection in enumerate(stack.selections):
+        if not selection.enabled:
+            continue
+        box_indices = [i for i in selection.boxes if 0 <= i < len(boxes)]
+        if not box_indices:
+            continue
+        mask = torch.zeros((height, width), dtype=torch.float32)
+        for box_index in box_indices:
+            mask = torch.maximum(mask, _bbox_mask_image(width, height, boxes[box_index], feather))
+        mask = _blur_mask(_grow_mask(mask, grow), blur)
+        masks.append(mask)
+        colors.append(_hex_to_rgb01(selection.color))
+        reports.append(
+            f"[{index + 1}] {selection.alias}: boxes={','.join(str(i + 1) for i in box_indices)} "
+            f"mask_sum={float(mask.sum()):.2f} mask_max={float(mask.max()):.4f}"
+        )
+    if masks:
+        batch = torch.stack(masks, dim=0)
+        union = batch.max(dim=0).values
+    else:
+        batch = torch.zeros((1, height, width), dtype=torch.float32)
+        union = torch.zeros((height, width), dtype=torch.float32)
+
+    preview = torch.zeros((height, width, 3), dtype=torch.float32)
+    for mask, color in zip(masks, colors):
+        c = torch.tensor(color, dtype=torch.float32).view(1, 1, 3)
+        preview = torch.maximum(preview, mask.unsqueeze(-1) * c)
+    return batch, union, preview.unsqueeze(0), reports
+
+
+def _as_stack(lora_stack: Any) -> LoraStack:
+    if isinstance(lora_stack, dict):
+        return _parse_lora_stack(json.dumps(lora_stack.get("selections", [])))
+    return _parse_lora_stack(lora_stack)
+
+
+def _select_enabled_row(stack: LoraStack, row_index: int) -> Tuple[int, LoraSelection]:
+    if not stack.selections:
+        raise ValueError("No LoRAs are present in the stack.")
+    idx = max(0, min(len(stack.selections) - 1, int(row_index) - 1))
+    return idx, stack.selections[idx]
+
+
+def _image_size(image: torch.Tensor) -> Tuple[int, int, int]:
+    if not torch.is_tensor(image) or image.ndim != 4:
+        raise ValueError("Expected IMAGE tensor shaped [batch, height, width, channels].")
+    return int(image.shape[0]), int(image.shape[2]), int(image.shape[1])
+
+
+def _mask_to_bhw(mask: torch.Tensor, height: int, width: int, batch: int = 1) -> torch.Tensor:
+    if not torch.is_tensor(mask):
+        return torch.zeros((batch, height, width), dtype=torch.float32)
+    m = mask.detach().to(dtype=torch.float32)
+    if m.ndim == 2:
+        m = m.unsqueeze(0)
+    elif m.ndim == 4:
+        # Accept either [B,H,W,1] or [B,1,H,W].
+        if m.shape[-1] == 1:
+            m = m[..., 0]
+        elif m.shape[1] == 1:
+            m = m[:, 0]
+        else:
+            m = m[:, 0]
+    elif m.ndim != 3:
+        m = m.reshape(1, height, width)
+    if int(m.shape[-2]) != height or int(m.shape[-1]) != width:
+        m = F.interpolate(m.unsqueeze(1), size=(height, width), mode="bilinear", align_corners=False)[:, 0]
+    if int(m.shape[0]) == 1 and batch > 1:
+        m = m.expand(batch, -1, -1)
+    elif int(m.shape[0]) != batch:
+        m = m[:1].expand(batch, -1, -1)
+    return m.clamp(0.0, 1.0)
+
+
+def _resize_bhw(mask: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    m = _mask_to_bhw(mask, int(mask.shape[-2]) if mask.ndim >= 2 else height, int(mask.shape[-1]) if mask.ndim >= 2 else width)
+    if int(m.shape[-2]) == height and int(m.shape[-1]) == width:
+        return m
+    return F.interpolate(m.unsqueeze(1), size=(height, width), mode="bilinear", align_corners=False)[:, 0].clamp(0.0, 1.0)
+
+
+def _resize_image_bhwc(image: torch.Tensor, height: int, width: int) -> torch.Tensor:
+    if int(image.shape[1]) == height and int(image.shape[2]) == width:
+        return image
+    x = image.movedim(-1, 1)
+    x = F.interpolate(x, size=(height, width), mode="bilinear", align_corners=False)
+    return x.movedim(1, -1).clamp(0.0, 1.0)
+
+
+def _union_boxes(boxes: Sequence[Tuple[float, float, float, float]]) -> Optional[Tuple[float, float, float, float]]:
+    if not boxes:
+        return None
+    return (
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    )
+
+
+def _crop_rect_from_bbox(
+    bbox: Tuple[float, float, float, float],
+    width: int,
+    height: int,
+    pad_pixels: int,
+    pad_percent: float,
+    min_size: int,
+    multiple: int,
+) -> Tuple[int, int, int, int]:
+    x0 = int(math.floor(bbox[0] * width))
+    y0 = int(math.floor(bbox[1] * height))
+    x1 = int(math.ceil(bbox[2] * width))
+    y1 = int(math.ceil(bbox[3] * height))
+    bw = max(1, x1 - x0)
+    bh = max(1, y1 - y0)
+    pad = max(int(pad_pixels), int(round(max(bw, bh) * float(pad_percent))))
+    x0 -= pad
+    y0 -= pad
+    x1 += pad
+    y1 += pad
+
+    target_w = max(int(min_size), x1 - x0)
+    target_h = max(int(min_size), y1 - y0)
+    if multiple > 1:
+        target_w = int(math.ceil(target_w / multiple) * multiple)
+        target_h = int(math.ceil(target_h / multiple) * multiple)
+
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    x0 = int(round(cx - target_w / 2.0))
+    y0 = int(round(cy - target_h / 2.0))
+    x1 = x0 + target_w
+    y1 = y0 + target_h
+
+    if x0 < 0:
+        x1 -= x0
+        x0 = 0
+    if y0 < 0:
+        y1 -= y0
+        y0 = 0
+    if x1 > width:
+        x0 -= x1 - width
+        x1 = width
+    if y1 > height:
+        y0 -= y1 - height
+        y1 = height
+    x0 = max(0, min(width - 1, x0))
+    y0 = max(0, min(height - 1, y0))
+    x1 = max(x0 + 1, min(width, x1))
+    y1 = max(y0 + 1, min(height, y1))
+    return x0, y0, x1, y1
+
+
+def _selection_mask(
+    selection: LoraSelection,
+    boxes: List[Tuple[float, float, float, float]],
+    width: int,
+    height: int,
+    feather: float,
+    grow: int,
+    blur: int,
+) -> Tuple[torch.Tensor, List[int]]:
+    box_indices = [i for i in selection.boxes if 0 <= i < len(boxes)]
+    mask = torch.zeros((height, width), dtype=torch.float32)
+    for box_index in box_indices:
+        mask = torch.maximum(mask, _bbox_mask_image(width, height, boxes[box_index], feather))
+    mask = _blur_mask(_grow_mask(mask, grow), blur)
+    return mask, box_indices
+
+
+def _combine_refine_mask(
+    bbox_mask: torch.Tensor,
+    refine_mask: Any,
+    mode: str,
+    batch: int,
+    height: int,
+    width: int,
+) -> torch.Tensor:
+    full = bbox_mask.unsqueeze(0).expand(batch, -1, -1).clone()
+    if refine_mask is None or mode == "bbox_only":
+        return full
+    refined = _mask_to_bhw(refine_mask, height, width, batch)
+    if mode == "refine_only":
+        return refined
+    if mode == "union_refine":
+        return torch.maximum(full, refined)
+    return (full * refined).clamp(0.0, 1.0)
+
+
+def _crop_info_report(info: Dict[str, Any]) -> str:
+    return (
+        f"alias={info.get('alias')} lora={info.get('lora')} strength={float(info.get('strength', 0.0)):.3f} "
+        f"row={int(info.get('row_index', 0))} crop=({info.get('x0')},{info.get('y0')})"
+        f"->({info.get('x1')},{info.get('y1')}) source={info.get('source_width')}x{info.get('source_height')} "
+        f"boxes={info.get('boxes_1based', [])}"
+    )
+
+
 # -------------------- ComfyUI nodes --------------------
 
 
@@ -1896,6 +2138,285 @@ class Krea2MultiLoRALoader:
         report = _format_assignment_report(stack, [])
         payload = {"selections": _stack_to_jsonable(stack)}
         return (payload, report)
+
+
+class Krea2LoRAStackRowModelLoader:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "lora_stack": (LORA_STACK_TYPE,),
+                "row_index": ("INT", {"default": 1, "min": 1, "max": 128}),
+                "strength_mode": (["stack_strength", "override", "multiply"], {"default": "stack_strength"}),
+                "strength": ("FLOAT", {"default": 1.0, "min": -10.0, "max": 10.0, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "STRING", "STRING", "FLOAT")
+    RETURN_NAMES = ("model", "alias", "lora_name", "effective_strength")
+    FUNCTION = "load_row"
+    CATEGORY = "Krea2/Regional LoRA"
+
+    def load_row(self, model, lora_stack, row_index, strength_mode, strength):
+        if comfy_sd is None:
+            raise RuntimeError("ComfyUI comfy.sd is unavailable; cannot use the native LoRA loader path.")
+        stack = _as_stack(lora_stack)
+        idx, selection = _select_enabled_row(stack, row_index)
+        if not selection.enabled or not selection.lora or selection.lora == NONE_LORA:
+            return (model, selection.alias, selection.lora, 0.0)
+        if strength_mode == "override":
+            effective = float(strength)
+        elif strength_mode == "multiply":
+            effective = float(selection.strength) * float(strength)
+        else:
+            effective = float(selection.strength)
+        path = _resolve_lora_path(selection.lora)
+        if not path:
+            raise RuntimeError(f"Could not resolve LoRA for row {idx + 1}: {selection.lora}")
+        lora = comfy_utils.load_torch_file(path, safe_load=True) if comfy_utils is not None else safetensors.torch.load_file(path, device="cpu")
+        loaded_model, _ = comfy_sd.load_lora_for_models(model, None, lora, effective, 0.0)
+        return (loaded_model, selection.alias, selection.lora, effective)
+
+
+class Krea2RegionalLoRACropExtract:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "lora_stack": (LORA_STACK_TYPE,),
+                "row_index": ("INT", {"default": 1, "min": 1, "max": 128}),
+                "canvas_width": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "canvas_height": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "bbox_list_format": (["xywh", "xyxy", "auto"], {"default": "xywh"}),
+                "pad_pixels": ("INT", {"default": 96, "min": 0, "max": 4096}),
+                "pad_percent": ("FLOAT", {"default": 0.15, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "min_crop_size": ("INT", {"default": 512, "min": 64, "max": 8192}),
+                "crop_multiple": ("INT", {"default": 16, "min": 1, "max": 256}),
+                "mask_feather": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 1.0, "step": 0.005}),
+                "grow_pixels": ("INT", {"default": 16, "min": 0, "max": 1024}),
+                "blur_pixels": ("INT", {"default": 12, "min": 0, "max": 1024}),
+                "refine_mask_mode": (["bbox_only", "intersect_refine", "union_refine", "refine_only"], {"default": "bbox_only"}),
+            },
+            "optional": {
+                "bboxes": ("BOUNDING_BOX",),
+                "kj_bboxes": ("BBOX",),
+                "refine_mask": ("MASK",),
+                "ideogram_prompt_json": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", CROP_INFO_TYPE, "STRING", "STRING", "FLOAT", "STRING")
+    RETURN_NAMES = ("crop_image", "crop_mask", "crop_info", "alias", "lora_name", "lora_strength", "report")
+    FUNCTION = "extract"
+    CATEGORY = "Krea2/Regional LoRA"
+
+    def extract(
+        self,
+        image,
+        lora_stack,
+        row_index,
+        canvas_width,
+        canvas_height,
+        bbox_list_format,
+        pad_pixels,
+        pad_percent,
+        min_crop_size,
+        crop_multiple,
+        mask_feather,
+        grow_pixels,
+        blur_pixels,
+        refine_mask_mode,
+        bboxes=None,
+        kj_bboxes=None,
+        refine_mask=None,
+        ideogram_prompt_json="",
+    ):
+        stack = _as_stack(lora_stack)
+        idx, selection = _select_enabled_row(stack, row_index)
+        batch, width, height = _image_size(image)
+        boxes = _collect_boxes(bboxes, kj_bboxes, ideogram_prompt_json, canvas_width, canvas_height, bbox_list_format)
+        if not boxes:
+            raise RuntimeError("No bboxes were provided to crop from.")
+        bbox_mask, box_indices = _selection_mask(selection, boxes, width, height, mask_feather, grow_pixels, blur_pixels)
+        selected_boxes = [boxes[i] for i in box_indices]
+        union = _union_boxes(selected_boxes)
+        if union is None:
+            raise RuntimeError(f"LoRA row {idx + 1} ({selection.alias}) has no valid assigned boxes.")
+        x0, y0, x1, y1 = _crop_rect_from_bbox(
+            union,
+            width,
+            height,
+            int(pad_pixels),
+            float(pad_percent),
+            int(min_crop_size),
+            int(crop_multiple),
+        )
+        full_mask = _combine_refine_mask(bbox_mask, refine_mask, refine_mask_mode, batch, height, width)
+        crop_image = image[:, y0:y1, x0:x1, :].clone()
+        crop_mask = full_mask[:, y0:y1, x0:x1].clone()
+        crop_info = {
+            "version": NODE_VERSION,
+            "row_index": idx + 1,
+            "alias": selection.alias,
+            "lora": selection.lora,
+            "strength": float(selection.strength),
+            "boxes_1based": [i + 1 for i in box_indices],
+            "x0": x0,
+            "y0": y0,
+            "x1": x1,
+            "y1": y1,
+            "source_width": width,
+            "source_height": height,
+            "full_mask": full_mask.detach().cpu(),
+            "crop_mask": crop_mask.detach().cpu(),
+        }
+        report = (
+            f"Krea2 regional crop extract version: {NODE_VERSION}\n"
+            + _crop_info_report(crop_info)
+            + f"\nmask_mode={refine_mask_mode} crop_image={tuple(crop_image.shape)} crop_mask={tuple(crop_mask.shape)} "
+            + f"mask_sum={float(crop_mask.sum()):.2f} mask_max={float(crop_mask.max()):.4f}"
+        )
+        return (crop_image, crop_mask, crop_info, selection.alias, selection.lora, float(selection.strength), report)
+
+
+class Krea2RegionalLoRACropComposite:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "base_image": ("IMAGE",),
+                "edited_crop": ("IMAGE",),
+                "crop_info": (CROP_INFO_TYPE,),
+                "mask_source": (["crop_info", "blend_mask_input"], {"default": "crop_info"}),
+                "extra_blur_pixels": ("INT", {"default": 0, "min": 0, "max": 1024}),
+                "opacity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+            },
+            "optional": {
+                "blend_mask": ("MASK",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("image", "used_mask", "report")
+    FUNCTION = "composite"
+    CATEGORY = "Krea2/Regional LoRA"
+
+    def composite(self, base_image, edited_crop, crop_info, mask_source, extra_blur_pixels, opacity, blend_mask=None):
+        batch, width, height = _image_size(base_image)
+        x0 = int(crop_info.get("x0", 0))
+        y0 = int(crop_info.get("y0", 0))
+        x1 = int(crop_info.get("x1", width))
+        y1 = int(crop_info.get("y1", height))
+        x0 = max(0, min(width - 1, x0))
+        y0 = max(0, min(height - 1, y0))
+        x1 = max(x0 + 1, min(width, x1))
+        y1 = max(y0 + 1, min(height, y1))
+        crop_h = y1 - y0
+        crop_w = x1 - x0
+
+        crop = edited_crop
+        if int(crop.shape[0]) == 1 and batch > 1:
+            crop = crop.expand(batch, -1, -1, -1)
+        elif int(crop.shape[0]) != batch:
+            crop = crop[:1].expand(batch, -1, -1, -1)
+        crop = _resize_image_bhwc(crop, crop_h, crop_w)
+
+        if mask_source == "blend_mask_input" and blend_mask is not None:
+            crop_mask = _mask_to_bhw(blend_mask, crop_h, crop_w, batch)
+        else:
+            stored = crop_info.get("crop_mask", None)
+            if torch.is_tensor(stored):
+                crop_mask = _mask_to_bhw(stored, crop_h, crop_w, batch)
+            else:
+                full = crop_info.get("full_mask", None)
+                crop_mask = _mask_to_bhw(full, height, width, batch)[:, y0:y1, x0:x1] if torch.is_tensor(full) else torch.ones((batch, crop_h, crop_w), dtype=torch.float32)
+        if int(extra_blur_pixels) > 0:
+            crop_mask = torch.stack([_blur_mask(m, int(extra_blur_pixels)) for m in crop_mask], dim=0)
+        crop_mask = (crop_mask * float(opacity)).clamp(0.0, 1.0).to(device=base_image.device, dtype=base_image.dtype)
+        crop = crop.to(device=base_image.device, dtype=base_image.dtype)
+
+        out = base_image.clone()
+        region = out[:, y0:y1, x0:x1, :]
+        alpha = crop_mask.unsqueeze(-1)
+        out[:, y0:y1, x0:x1, :] = region * (1.0 - alpha) + crop * alpha
+        used_mask = torch.zeros((batch, height, width), device=base_image.device, dtype=torch.float32)
+        used_mask[:, y0:y1, x0:x1] = crop_mask.detach().to(dtype=torch.float32)
+        report = (
+            f"Krea2 regional crop composite version: {NODE_VERSION}\n"
+            + _crop_info_report(crop_info)
+            + f"\nmask_source={mask_source} opacity={float(opacity):.3f} extra_blur_pixels={int(extra_blur_pixels)} "
+            + f"used_mask_sum={float(used_mask.sum().detach().cpu()):.2f} used_mask_max={float(used_mask.max().detach().cpu()):.4f}"
+        )
+        return (out.clamp(0.0, 1.0), used_mask, report)
+
+
+class Krea2RegionMasksFromBBoxes:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "lora_stack": (LORA_STACK_TYPE,),
+                "canvas_width": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "canvas_height": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "mask_width": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "mask_height": ("INT", {"default": 1024, "min": 1, "max": 65535}),
+                "bbox_list_format": (["xywh", "xyxy", "auto"], {"default": "xywh"}),
+                "feather": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 1.0, "step": 0.005}),
+                "grow_pixels": ("INT", {"default": 0, "min": 0, "max": 512}),
+                "blur_pixels": ("INT", {"default": 0, "min": 0, "max": 512}),
+            },
+            "optional": {
+                "bboxes": ("BOUNDING_BOX",),
+                "kj_bboxes": ("BBOX",),
+                "ideogram_prompt_json": ("STRING", {"multiline": True, "default": ""}),
+            },
+        }
+
+    RETURN_TYPES = ("MASK", "MASK", "IMAGE", "STRING")
+    RETURN_NAMES = ("region_masks", "union_mask", "preview", "report")
+    FUNCTION = "build_masks"
+    CATEGORY = "Krea2/Regional LoRA"
+
+    def build_masks(
+        self,
+        lora_stack,
+        canvas_width,
+        canvas_height,
+        mask_width,
+        mask_height,
+        bbox_list_format,
+        feather,
+        grow_pixels,
+        blur_pixels,
+        bboxes=None,
+        kj_bboxes=None,
+        ideogram_prompt_json="",
+    ):
+        stack = _parse_lora_stack(json.dumps(lora_stack.get("selections", []))) if isinstance(lora_stack, dict) else _parse_lora_stack(lora_stack)
+        boxes = _collect_boxes(bboxes, kj_bboxes, ideogram_prompt_json, canvas_width, canvas_height, bbox_list_format)
+        width = max(1, int(mask_width))
+        height = max(1, int(mask_height))
+        batch, union, preview, mask_lines = _region_masks_from_stack(
+            stack,
+            boxes,
+            width,
+            height,
+            float(feather),
+            int(grow_pixels),
+            int(blur_pixels),
+        )
+        report = (
+            _format_assignment_report(stack, boxes)
+            + f"\nMask output: region_masks batch={tuple(batch.shape)} union_mask={tuple(union.shape)} preview={tuple(preview.shape)} "
+            + f"grow_pixels={int(grow_pixels)} blur_pixels={int(blur_pixels)} feather={float(feather):.3f}"
+        )
+        if mask_lines:
+            report += "\nMasks:\n" + "\n".join(mask_lines)
+        else:
+            report += "\nNo enabled selections with valid assigned boxes."
+        return (batch, union, preview, report)
 
 
 class Krea2RegionalLoRAApply:
@@ -1990,7 +2511,10 @@ class Krea2RegionalLoRAApply:
 class Krea2RegionalLoRAApplySimple:
     @classmethod
     def INPUT_TYPES(cls):
-        return Krea2RegionalLoRAApply.INPUT_TYPES()
+        types = Krea2RegionalLoRAApply.INPUT_TYPES()
+        required = dict(types["required"])
+        required["txtfusion_strength"] = ("FLOAT", {"default": 0.0, "min": 0.0, "max": 2.0, "step": 0.01})
+        return {"required": required, "optional": types.get("optional", {})}
 
     RETURN_TYPES = ("MODEL", "STRING")
     RETURN_NAMES = ("model", "report")
@@ -2013,6 +2537,7 @@ class Krea2RegionalLoRAApplySimple:
         image_cols,
         apply_to,
         debug_logging,
+        txtfusion_strength,
         bboxes=None,
         kj_bboxes=None,
         ideogram_prompt_json="",
@@ -2045,6 +2570,7 @@ class Krea2RegionalLoRAApplySimple:
             debug=bool(debug_logging),
             canvas_aspect=aspect,
         )
+        state.txtfusion_strength = float(txtfusion_strength)
         model_out.add_wrapper_with_key(
             patcher_extension.WrappersMP.DIFFUSION_MODEL,
             WRAPPER_KEY + "_simple",
@@ -2053,7 +2579,7 @@ class Krea2RegionalLoRAApplySimple:
         report = (
             _format_assignment_report(stack, boxes)
             + "\nExecution mode: simple activation-delta injection, modeled after the external Fedor node. "
-            + "Uses runtime latent_grid/patch_size and applies the same full-sequence regional mask to txtfusion and image blocks; short text-only sequences receive mask mean, not full global strength."
+            + f"Uses runtime latent_grid/patch_size and applies regional masks to matched layers; txtfusion_strength={float(txtfusion_strength):.3f} controls non-spatial txtfusion layers."
             + "\n\nPatch summary:\n"
             + "\n".join(lines)
         )
@@ -2187,6 +2713,10 @@ class Krea2RegionalLoRAPreview:
 
 NODE_CLASS_MAPPINGS = {
     "Krea2MultiLoRALoader": Krea2MultiLoRALoader,
+    "Krea2LoRAStackRowModelLoader": Krea2LoRAStackRowModelLoader,
+    "Krea2RegionalLoRACropExtract": Krea2RegionalLoRACropExtract,
+    "Krea2RegionalLoRACropComposite": Krea2RegionalLoRACropComposite,
+    "Krea2RegionMasksFromBBoxes": Krea2RegionMasksFromBBoxes,
     "Krea2RegionalLoRAApply": Krea2RegionalLoRAApply,
     "Krea2RegionalLoRAApplySimple": Krea2RegionalLoRAApplySimple,
     "Krea2RegionalLoRADiagnostics": Krea2RegionalLoRADiagnostics,
@@ -2195,6 +2725,10 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "Krea2MultiLoRALoader": "Krea2 Multi LoRA Loader",
+    "Krea2LoRAStackRowModelLoader": "Krea2 LoRA Stack Row Model Loader",
+    "Krea2RegionalLoRACropExtract": "Krea2 Regional LoRA Crop Extract",
+    "Krea2RegionalLoRACropComposite": "Krea2 Regional LoRA Crop Composite",
+    "Krea2RegionMasksFromBBoxes": "Krea2 Region Masks From BBoxes",
     "Krea2RegionalLoRAApply": "Krea2 Regional LoRA Apply",
     "Krea2RegionalLoRAApplySimple": "Krea2 Regional LoRA Apply Simple",
     "Krea2RegionalLoRADiagnostics": "Krea2 Regional LoRA Diagnostics",
